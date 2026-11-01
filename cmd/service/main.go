@@ -12,9 +12,8 @@ import (
 func main() {
 	defer logger.Global().Sync()
 
-	httpServer := bootstrap.HTTPServer()
 	manager := pkgApp.NewLifecycleManager(5 * time.Second)
-	manager.Add(httpServer)
+	manager.Add(bootstrap.Servers()...)
 
 	if err := manager.Run(context.Background()); err != nil {
 		logger.Global().Fatal("application failed")

@@ -6,6 +6,8 @@ import (
 
 	api "github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/docs"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/app/container"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/app/middleware"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/auth"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/logger"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/web"
 	"github.com/gin-gonic/gin"
@@ -30,6 +32,15 @@ func SetupRouter(c *container.HandlersWrapper, m *container.Middlewares) *gin.En
 	})
 
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	v1 := router.Group("/v1")
+
+	v1.GET("/budgets/:serviceOrderId",
+		middleware.Auth(auth.ATTENDANT, auth.MECHANIC, auth.ADMIN, auth.CUSTOMER),
+		GinHandler(c.Billing.GetBudget))
+	v1.GET("/payments/:serviceOrderId", middleware.Auth(auth.AttendantRoles...), GinHandler(c.Billing.GetPayment))
+	v1.POST("/payments/:id/confirm", middleware.Auth(auth.AttendantRoles...), GinOnlyErrorHandler(c.Billing.Confirm, http2.StatusNoContent))
+	v1.POST("/payments/:id/reject", middleware.Auth(auth.AttendantRoles...), GinOnlyErrorHandler(c.Billing.Reject, http2.StatusNoContent))
 
 	return router
 }

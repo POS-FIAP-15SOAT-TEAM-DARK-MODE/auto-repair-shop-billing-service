@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/app"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/budget"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
 	jsonv2 "github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/json"
 )
 
@@ -27,11 +29,12 @@ func Error(err error) (int, errorResponse) {
 }
 
 // getHTTPStatus determines the HTTP status code for a given error.
-// Domain errors are added here as each domain package is introduced.
 func getHTTPStatus(err error) int {
 	switch {
 	case isBadRequestError(err), IsJoined(err):
 		return http.StatusBadRequest
+	case isNotFoundError(err):
+		return http.StatusNotFound
 	case isInternalServerError(err):
 		return http.StatusInternalServerError
 	case isConflictError(err):
@@ -88,9 +91,15 @@ func isInternalServerError(err error) bool {
 		errors.Is(err, jsonv2.ErrJSONInvalidUnmarshal)
 }
 
+func isNotFoundError(err error) bool {
+	return errors.Is(err, budget.ErrNotFound) ||
+		errors.Is(err, payment.ErrNotFound)
+}
+
 func isConflictError(err error) bool {
 	return errors.Is(err, app.ErrDataConflict) ||
-		errors.Is(err, app.ErrInfraConflict)
+		errors.Is(err, app.ErrInfraConflict) ||
+		errors.Is(err, payment.ErrInvalidTransition)
 }
 
 func isUnprocessableEntityError(err error) bool {
