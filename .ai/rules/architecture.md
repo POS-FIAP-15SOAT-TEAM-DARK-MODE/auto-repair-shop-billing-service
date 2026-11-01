@@ -22,6 +22,9 @@ Repositories hold no `*sql.DB`. Connection comes from context, injected by UoW:
 - **Mutating ops** (inside tx): `postgres.GetTransaction(ctx)` → returns `*sql.Tx` stored by UoW `OnStart` hook.
 - **Read-only ops**: `postgres.GetOneTimeTransaction(ctx)` → opens a fresh `*sql.DB` connection.
 
+## Transactions (consumer and REST)
+Commands run inside the transaction given by the consumer (dedupe + effect + outbox + commit). REST decisions open their own `*sql.Tx`. Repositories take `db.Executor`, so they work with `*sql.DB` or `*sql.Tx`.
+
 ## Unit of Work
 ```go
 uow.Execute(ctx, func1, func2, ...)

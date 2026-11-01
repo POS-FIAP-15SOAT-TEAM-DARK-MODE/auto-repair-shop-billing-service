@@ -7,8 +7,8 @@
 ## Always-Applied Rules
 
 ### 1. Security
-- Never log or expose CPF, CNPJ, passwords, or JWT tokens in any response, log entry, or error message.
-- bcrypt min cost 12; auth middleware must not make extra DB calls — rely entirely on JWT payload.
+- Never log or expose card/payment data, passwords, JWT tokens, or customer documents in any response, log entry, or error message.
+- Auth middleware must not make extra DB calls — rely entirely on JWT payload.
 - Validate all input at handler layer; never trust raw strings inside services or domain.
 
 ### 2. Git Conventions

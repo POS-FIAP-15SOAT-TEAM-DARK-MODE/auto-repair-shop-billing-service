@@ -1,60 +1,15 @@
-# API
+# API — Billing Service (port 8083)
 
-## Versioning
-All endpoints under `/v1/`. Swagger UI at `http://localhost:8080/swagger/index.html`.
-
-## Endpoints
+Base path `/v1`. Monetary values are decimal strings. Errors: `{"code", "error", "errors"}` (see `internal/pkg/web`).
 
 ```
-POST   /auth/register                              ADMIN
-POST   /auth/login                                 public
-POST   /customers                                  ADMIN, ATTENDANT
-GET    /customers/:id                              ADMIN, ATTENDANT
-GET    /customers                                  ADMIN, ATTENDANT
-PUT    /customers/:id                              ADMIN, ATTENDANT
-DELETE /customers/:id                              ADMIN, ATTENDANT
-POST   /works                                      ADMIN, ATTENDANT
-GET    /works                                      ADMIN, ATTENDANT, MECHANIC
-PUT    /works/:id                                  ADMIN, ATTENDANT, MECHANIC
-DELETE /works/:id                                  ADMIN, ATTENDANT, MECHANIC
-POST   /vehicles                                   ADMIN, ATTENDANT, MECHANIC
-GET    /vehicles                                   ADMIN, ATTENDANT, MECHANIC  (by license plate)
-PUT    /vehicles/:id                               ADMIN, ATTENDANT, MECHANIC
-DELETE /vehicles/:id                               ADMIN, ATTENDANT, MECHANIC
-GET    /vehicles/:customerId                       ADMIN, ATTENDANT  (list by customer)
-POST   /supplies                                   ADMIN, ATTENDANT, MECHANIC
-GET    /supplies                                   ADMIN, ATTENDANT, MECHANIC
-PUT    /supplies/:id                               ADMIN, ATTENDANT, MECHANIC
-POST   /service-order                              ADMIN, ATTENDANT
-GET    /service-order/:id/history                  ADMIN, ATTENDANT
-GET    /service-order/:id/services                 ADMIN, ATTENDANT
-POST   /service-order/:id/services                 ADMIN, ATTENDANT
-DELETE /service-order/:id/services/:serviceId      ADMIN, ATTENDANT
-GET    /service-order/:id/supplies                 ADMIN, ATTENDANT
-POST   /service-order/:id/supplies                 ADMIN, ATTENDANT
-DELETE /service-order/:id/supplies/:supplyId       ADMIN, ATTENDANT
+GET  /v1/budgets/:serviceOrderId      ADMIN, ATTENDANT, MECHANIC, CUSTOMER (owner only)
+GET  /v1/payments/:serviceOrderId     ADMIN, ATTENDANT
+POST /v1/payments/:id/confirm         ADMIN, ATTENDANT   204 | 404 | 409
+POST /v1/payments/:id/reject          ADMIN, ATTENDANT   204 | 404 | 409
+GET  /ping, /metrics, /swagger/*      public
 ```
 
-## Request/Response Conventions
-- All bodies: JSON.
-- Timestamps: UTC ISO 8601.
-- IDs: UUID strings (ULID strings for service order IDs).
-- Pagination: `?limit=N&offset=N`.
-
-## Error Format
-```json
-{ "error": "Human-readable message", "code": "MACHINE_READABLE_CODE" }
-```
-
-| HTTP | Meaning |
-|---|---|
-| 400 | Validation error |
-| 401 | Missing or invalid auth |
-| 403 | Forbidden (wrong role) |
-| 404 | Not found |
-| 409 | Conflict |
-| 422 | Business rule violation |
-| 500 | Unexpected error |
-
-## Swagger
-Every endpoint must have: summary, description, request body schema, response schemas (success + errors), 401/403 documented on all protected endpoints, and role requirements noted.
+- Route roles are declared in `internal/app/routing/routing.go` with `middleware.Auth(...)`.
+- Confirm/reject emit `PaymentApproved`/`PaymentFailed` through the outbox in the same transaction.
+- No `/internal` routes in this service. Swagger: `docs/swagger.yaml` (embedded).

@@ -5,7 +5,7 @@ Go 1.26 · Gin · PostgreSQL 15 · `lib/pq` (raw SQL, no ORM) · `golang-migrate
 
 ## ID Types
 - `google/uuid` — all entity IDs except service orders.
-- `oklog/ulid/v2` — `ServiceOrder` and `ServiceOrderHistory` IDs (sortable by creation time).
+- `github.com/google/uuid` — UUID v4 for `message_id` and entity ids. Money: `shopspring/decimal` only (never float).
 
 ## Monetary Values
 Always use `shopspring/decimal.Decimal`, never `float64` or `float32`. DB column type: `NUMERIC(10,2)`.
@@ -18,7 +18,7 @@ Always use `shopspring/decimal.Decimal`, never `float64` or `float32`. DB column
 ## Mock Generation
 Mocks live in `internal/domain/mocks/` and are generated via `//go:generate` directives on interface files:
 ```go
-//go:generate go run github.com/vektra/mockery/v2 --name=CustomerRepository
+//go:generate go run github.com/vektra/mockery/v2 --name=Repository
 ```
 Run `make mockgen` to regenerate. Never edit generated mock files manually.
 

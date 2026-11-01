@@ -1,61 +1,28 @@
-# Domain
+# Domain — Billing Service
 
-## Ubiquitous Language
+Owns budgets and payments of service orders. Participates in the saga orchestrated by Service Order
+(commands in `saga-commands`, events in `billing-events`). Contract: `docs/fase4/contracts/messaging.md`.
 
-| Code name | Business concept |
+## Entities
+| Entity | Description |
 |---|---|
-| `Work` | Billable service: name, description, unit price, ACTIVE/INACTIVE |
-| `Supply` | Part/supply with stock quantity, unit price, optimistic-lock `Version` |
-| `ServiceOrder` | Central aggregate: Customer + Vehicle + []Work + []Supply |
-| `ServiceOrderHistory` | Immutable record of every status transition |
-| `Customer` | Identified by CPF (individual) or CNPJ (company); linked 1:1 to a User |
-| `User` | System account: name, email, bcrypt-hashed password, roles |
-| `Vehicle` | License plate + brand/model/year, always linked to a Customer |
+| `Budget` | Quote of a service order: `GENERATED` or `CANCELLED`. Total = Σ work.unit_price + Σ supply.unit_price × quantity |
+| `BudgetItem` | Work (quantity 1) or supply (quantity > 0) line of a budget |
+| `Payment` | Charge of a budget total: `PENDING`, `APPROVED`, `REJECTED`, `REFUNDED`, `CANCELLED`. Keeps `saga_id` |
 
-## Service Order Status Lifecycle
+## Rules
+- Money is `shopspring/decimal`, rounded to 2 places; JSON carries decimal strings (`"221.00"`).
+- At most one `GENERATED` budget per service order; at most one open (`PENDING`/`APPROVED`) payment per service order (partial unique indexes).
+- Payment transitions: `PENDING → APPROVED | REJECTED | CANCELLED`; `APPROVED → REFUNDED`. Anything else is `ErrInvalidTransition` (REST: 409).
+- `RequestPayment` is discarded (logged, not an error) when there is no `GENERATED` budget, the amount differs from the total, or an open payment already exists.
+- `RefundPayment`: `PENDING → CANCELLED` (no event); `APPROVED → REFUNDED` (+ provider refund, emits `PaymentRefunded`); other states are ignored.
+- `payment.saga_id` is stored from the `RequestPayment` envelope and reused by manual `confirm`/`reject` events.
+- `PaymentProvider` (`Charge`, `Refund`) is implemented by the internal provider, guided by `PAYMENT_MODE` (`manual` | `auto-approve` | `auto-reject`).
 
-```
-NEW → RECEIVED → IN_DIAGNOSIS → AWAITING_APPROVAL → IN_PROGRESS → COMPLETED → DELIVERED
-                                        ↓
-                                   REJECTED (terminal)
-```
-
-`AddWorks`, `RemoveWork`, `AddSupplies`, `RemoveSupply` require status = `NEW` → `ErrServiceOrderNotNew` otherwise.
-Budget becomes immutable once status reaches `IN_PROGRESS`.
-
-## RBAC
-
-Roles: `ADMIN`, `ATTENDANT`, `MECHANIC`, `CUSTOMER`
-
-| Role | Scope |
+## Roles (REST)
+| Role | Access |
 |---|---|
-| `ADMIN` | Unrestricted, exclusive (cannot combine with other roles) |
-| `ATTENDANT` | Customers, vehicles, service orders, works, supplies — no user management |
-| `MECHANIC` | Read service orders; add/remove works and supplies; status transitions |
-| `CUSTOMER` | Own service order status + own budget approve/reject (scoped by `customerId` in JWT) |
-
-Role groups in `domain/roles.go`: `AttendantRoles`, `MechanicRoles`, `CustomerRoles`, `AttendantAndMechanicRoles`.
-
-## User & Customer Split
-- Creating a Customer automatically creates a linked User with role `CUSTOMER`.
-- Default password = CPF (individual) or CNPJ (company), bcrypt-hashed (min cost 12).
-- Deleting a Customer must also delete/deactivate the associated User.
-
-## Budget Formula
-```
-total = Σ work.unit_price + Σ (supply.unit_price × quantity)
-```
-Auto-recalculate whenever works or supplies change. Immutable once status reaches `IN_PROGRESS`.
-
-## Stock Decrement Pattern
-```sql
-UPDATE supply SET stock_quantity = stock_quantity - $amount, updated_at = NOW()
-WHERE id = $id AND stock_quantity >= $amount
-```
-If `RowsAffected == 0` → return `ErrSupplyOutOfStock`. No `SELECT FOR UPDATE` — the conditional UPDATE itself prevents overselling. Stock restored on `RemoveSupply` via `RestoreStock` in the same transaction.
-
-## Input Validation
-- CPF: format `###.###.###-##` + check digit algorithm.
-- CNPJ: format `##.###.###/####-##` + check digit algorithm.
-- License plate: old `ABC-1234` and Mercosul `ABC1D23`.
-- Monetary: `NUMERIC(10,2)` — never `float64`.
+| `ADMIN` | everything |
+| `ATTENDANT` | `GET /v1/payments/:serviceOrderId`, `POST /v1/payments/:id/confirm|reject` |
+| `MECHANIC` | `GET /v1/budgets/:serviceOrderId` |
+| `CUSTOMER` | `GET /v1/budgets/:serviceOrderId` for its own budget only (other customers get 404) |

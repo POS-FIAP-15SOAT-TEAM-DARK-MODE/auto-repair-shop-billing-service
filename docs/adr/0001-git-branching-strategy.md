@@ -1,4 +1,4 @@
-# ADR 0003 — Git branching strategy: feature → develop → main
+# ADR 0001 — Git branching strategy: feature → develop → main
 
 - Status: Accepted
 - Date: 2026-08-22
@@ -7,7 +7,7 @@
 
 ## Context
 
-Our engineering governance policy requires, across all 4 repositories: a protected `main`/`master` branch with no direct commits, and mandatory Pull Requests for merges. This repo's `docker.yml` also treats `main` and `develop` as deploy targets (`PRD` and `STG` GitHub Environments respectively), so branch structure is not just a code-review convention here — it directly gates what gets deployed where.
+Our engineering governance policy requires, across all repositories: a protected `main`/`master` branch with no direct commits, and mandatory Pull Requests for merges. This repo's `docker.yml` also treats `main` and `develop` as deploy targets (`PRD` and `STG` GitHub Environments respectively), so branch structure is not just a code-review convention here — it directly gates what gets deployed where.
 
 Before this decision, `main` had branch protection (1 required approval) but `develop` did not, and there was no explicit rule for where feature branches should merge first.
 
