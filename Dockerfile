@@ -44,7 +44,7 @@ COPY --from=builder /app/main .
 USER appuser
 
 # Expose port
-EXPOSE ${PORT:-8080}
+EXPOSE ${PORT:-8083}
 
 # Run the binary
 ENTRYPOINT ["/app/main"]
