@@ -220,7 +220,9 @@ func TestGenerateBudgetPublishesEvent(t *testing.T) {
 	ev := e.receiveEvent("BudgetGenerated")
 	assert.Equal(t, soID, ev.ServiceOrderID)
 	assert.Equal(t, "saga-it-1", ev.SagaID)
-	assert.Contains(t, string(ev.Payload), `"total_amount":"221.00"`)
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(ev.Payload, &payload))
+	assert.Equal(t, "221.00", payload["total_amount"])
 }
 
 func TestDuplicateMessageAppliesOnce(t *testing.T) {
