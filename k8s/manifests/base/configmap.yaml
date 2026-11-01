@@ -1,19 +1,16 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: app-config
+  name: billing-service-config
   labels:
-    app: auto-repair-shop
-# Non-sensitive runtime config (mirrors .env). Sensitive values live in the
-# Secret. POSTGRES_HOST points at the in-cluster Postgres by default and is
-# overridden to the RDS endpoint in the aws overlay.
+    app: billing-service
+# Non-sensitive runtime config (mirrors .env). Sensitive values live in
+# billing-service-secrets. Overlays set POSTGRES_HOST (RDS endpoint) and PAYMENT_MODE.
+# BILLING_QUEUE_URL / BILLING_EVENTS_TOPIC_ARN are applied by the docker workflow.
 data:
-  POSTGRES_USER: "postgres"
-  POSTGRES_DB: "autorepairshop"
-  POSTGRES_HOST: "postgres"
-  POSTGRES_PORT: "5432"
-  JWT_EXPIRES_IN: "24h"
-  BCRYPT_COST: "12"
+  PORT: "8083"
   LOG_LEVEL: "INFO"
-  PORT: "8080"
+  POSTGRES_PORT: "5432"
   POSTGRES_SSLMODE: "disable"
+  AWS_REGION: "us-east-1"
+  PAYMENT_MODE: "manual"

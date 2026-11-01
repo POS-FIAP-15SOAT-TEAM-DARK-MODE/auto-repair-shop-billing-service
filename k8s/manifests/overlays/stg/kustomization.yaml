@@ -3,28 +3,24 @@ kind: Kustomization
 
 namespace: auto-repair-shop
 
-# No in-cluster Postgres — the database is RDS (Terraform). The app Secret is
-# produced by the External Secrets Operator from Secrets Manager (secrets.yaml).
 resources:
   - ../../base
   - secrets.yaml
-  - ingress.yaml
 
 components:
   - ../../components/observability
 
-# Image published to ECR. The pipeline overrides newTag with the commit SHA.
 images:
-  - name: auto-repair-shop
-    newName: 000000000000.dkr.ecr.us-east-1.amazonaws.com/auto-repair-shop
+  - name: auto-repair-shop-billing-service
+    newName: 000000000000.dkr.ecr.us-east-1.amazonaws.com/auto-repair-shop-billing-service
     newTag: latest
 
 patches:
   - path: patch-configmap.yaml
     target:
       kind: ConfigMap
-      name: app-config
+      name: billing-service-config
   - path: patch-hpa.yaml
     target:
       kind: HorizontalPodAutoscaler
-      name: auto-repair-shop
+      name: billing-service

@@ -1,7 +1,7 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: auto-repair-shop
+  name: billing-service
 spec:
   minReplicas: 2
   maxReplicas: 6

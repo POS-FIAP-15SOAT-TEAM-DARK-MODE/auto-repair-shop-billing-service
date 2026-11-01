@@ -3,10 +3,8 @@ kind: Kustomization
 
 namespace: auto-repair-shop
 
-# Restricted-account (AWS Academy Learner Lab) overlay. No ALB Ingress and no
-# External Secrets: IRSA is unavailable there. The app Secret is created by the
-# pipeline from Secrets Manager, and the app is reached via `kubectl port-forward`
-# (a NodePort is also exposed for direct node access).
+# AWS Academy Learner Lab overlay: no Ingress/LoadBalancer and no External Secrets (no IRSA).
+# The app Secret is created by the pipeline from Secrets Manager.
 resources:
   - ../../base
 
@@ -14,11 +12,7 @@ components:
   - ../../components/observability
 
 patches:
-  - path: patch-service-loadbalancer.yaml
-    target:
-      kind: Service
-      name: auto-repair-shop
   - path: patch-configmap.yaml
     target:
       kind: ConfigMap
-      name: app-config
+      name: billing-service-config
