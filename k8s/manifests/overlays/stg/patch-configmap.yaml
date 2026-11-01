@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  # RDS endpoint from `terraform output db_host` (aws state, workspace stg).
+  POSTGRES_HOST: "REPLACE_WITH_STG_RDS_ENDPOINT"
+  POSTGRES_SSLMODE: "require"
+  LOG_LEVEL: "INFO"
+  BCRYPT_COST: "12"

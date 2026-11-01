@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: auto-repair-shop
+
+resources:
+  - ../../base
+  - secret.yaml
+  - postgres.yaml
+
+# Uses the image built + `kind load`ed locally.
+images:
+  - name: auto-repair-shop
+    newTag: dev
+
+patches:
+  - path: patch-service-nodeport.yaml
+    target:
+      kind: Service
+      name: auto-repair-shop
+  - path: patch-configmap-local.yaml
+    target:
+      kind: ConfigMap
+      name: app-config

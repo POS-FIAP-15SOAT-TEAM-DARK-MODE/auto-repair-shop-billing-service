@@ -1,0 +1,10 @@
+# Local-only overrides: point at the in-cluster Postgres and use cheap dev
+# settings (fast bcrypt, verbose logs).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  POSTGRES_HOST: "postgres"
+  BCRYPT_COST: "4"
+  LOG_LEVEL: "DEBUG"

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  POSTGRES_HOST: "RDS_HOST_PLACEHOLDER"
+  POSTGRES_SSLMODE: "require"

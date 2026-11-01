@@ -1,0 +1,14 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: auto-repair-shop
+  labels:
+    app: auto-repair-shop
+spec:
+  selector:
+    matchLabels:
+      app: auto-repair-shop
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

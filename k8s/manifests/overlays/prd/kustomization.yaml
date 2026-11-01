@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: auto-repair-shop
+
+resources:
+  - ../../base
+  - secrets.yaml
+  - ingress.yaml
+
+components:
+  - ../../components/observability
+
+images:
+  - name: auto-repair-shop
+    newName: 000000000000.dkr.ecr.us-east-1.amazonaws.com/auto-repair-shop
+    newTag: latest
+
+patches:
+  - path: patch-configmap.yaml
+    target:
+      kind: ConfigMap
+      name: app-config
+  - path: patch-hpa.yaml
+    target:
+      kind: HorizontalPodAutoscaler
+      name: auto-repair-shop

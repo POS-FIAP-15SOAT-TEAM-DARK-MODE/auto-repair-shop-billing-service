@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auto-repair-shop
+  labels:
+    app: auto-repair-shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auto-repair-shop
+  template:
+    metadata:
+      labels:
+        app: auto-repair-shop
+    spec:
+      serviceAccountName: auto-repair-shop
+      # The db-migrate Job and this Deployment are applied by the same
+      # `kubectl apply -k`, with no ordering guarantee between them — without
+      # this, the app can boot (and run its DB seed) before migrations have
+      # created the schema, failing with a silently-discarded 42P01 and
+      # leaving the app running with zero seed data.
+      initContainers:
+        - name: wait-for-migrations
+          # bitnami/kubectl:1.31 was removed from Docker Hub (Bitnami deprecated
+          # legacy container tags), causing ImagePullBackOff on every app pod.
+          # alpine/k8s bundles kubectl and is confirmed pullable/maintained.
+          image: alpine/k8s:1.31.2
+          command:
+            - sh
+            - -c
+            - |
+              until kubectl get job/db-migrate -n "$POD_NAMESPACE" >/dev/null 2>&1; do
+                echo 'waiting for the db-migrate Job to be created...'
+                sleep 2
+              done
+              kubectl wait --for=condition=complete --timeout=300s -n "$POD_NAMESPACE" job/db-migrate
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+      containers:
+        - name: app
+          # Overridden per overlay via the kustomize `images:` transformer.
+          image: auto-repair-shop:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-secrets
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # Requests are required for the HPA CPU/memory targets to work.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

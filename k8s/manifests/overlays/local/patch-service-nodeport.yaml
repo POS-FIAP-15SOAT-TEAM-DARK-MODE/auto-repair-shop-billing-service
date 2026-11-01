@@ -1,0 +1,13 @@
+# Expose the app on a fixed NodePort so the Kind extraPortMapping
+# (30080 -> localhost:8080) reaches it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: auto-repair-shop
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080

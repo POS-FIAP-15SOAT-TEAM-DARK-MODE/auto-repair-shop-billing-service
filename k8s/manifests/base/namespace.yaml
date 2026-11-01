@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: auto-repair-shop
+  labels:
+    app.kubernetes.io/name: auto-repair-shop
+    app.kubernetes.io/managed-by: kustomize
