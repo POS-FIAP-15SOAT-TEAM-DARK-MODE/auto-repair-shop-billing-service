@@ -1,0 +1,133 @@
+openapi: 3.0.3
+info:
+  title: Auto Repair Shop - Billing Service
+  version: 1.0.0
+  description: Budgets and payments of service orders. Monetary values are decimal strings (e.g. "221.00").
+servers:
+  - url: http://localhost:8083
+security:
+  - bearerAuth: []
+paths:
+  /v1/budgets/{serviceOrderId}:
+    get:
+      summary: Get the generated budget of a service order
+      description: Attendant, mechanic and admin see any budget; a customer sees only its own (other customers get 404).
+      parameters:
+        - name: serviceOrderId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Budget
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Budget'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/payments/{serviceOrderId}:
+    get:
+      summary: Get the most recent payment of a service order
+      description: Attendant and admin.
+      parameters:
+        - name: serviceOrderId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Payment
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Payment'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/payments/{id}/confirm:
+    post:
+      summary: Approve a PENDING payment (emits PaymentApproved)
+      description: Attendant and admin.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: X-Request-Id
+          in: header
+          required: false
+          schema: {type: string}
+      responses:
+        '204': {description: Approved}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /v1/payments/{id}/reject:
+    post:
+      summary: Reject a PENDING payment (emits PaymentFailed with reason PAYMENT_REJECTED)
+      description: Attendant and admin.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: X-Request-Id
+          in: header
+          required: false
+          schema: {type: string}
+      responses:
+        '204': {description: Rejected}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code: {type: integer}
+              error: {type: string}
+              errors:
+                type: array
+                items: {type: string}
+  schemas:
+    BudgetItem:
+      type: object
+      properties:
+        kind: {type: string, enum: [WORK, SUPPLY]}
+        ref_id: {type: string}
+        name: {type: string}
+        quantity: {type: integer}
+        unit_price: {type: string, example: "35.50"}
+    Budget:
+      type: object
+      properties:
+        id: {type: string}
+        service_order_id: {type: string}
+        status: {type: string, enum: [GENERATED]}
+        total_amount: {type: string, example: "221.00"}
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/BudgetItem'}
+        created_at: {type: string, format: date-time}
+    Payment:
+      type: object
+      properties:
+        id: {type: string}
+        budget_id: {type: string}
+        service_order_id: {type: string}
+        amount: {type: string, example: "221.00"}
+        status: {type: string, enum: [PENDING, APPROVED, REJECTED, REFUNDED, CANCELLED]}
+        provider: {type: string, example: internal}
+        created_at: {type: string, format: date-time}

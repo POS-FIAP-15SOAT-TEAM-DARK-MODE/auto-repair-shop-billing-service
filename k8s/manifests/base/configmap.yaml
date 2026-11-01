@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: billing-service-config
+  labels:
+    app: billing-service
+# Non-sensitive runtime config (mirrors .env). Sensitive values live in
+# billing-service-secrets. Overlays set POSTGRES_HOST (RDS endpoint) and PAYMENT_MODE.
+# BILLING_QUEUE_URL / BILLING_EVENTS_TOPIC_ARN are applied by the docker workflow.
+data:
+  PORT: "8083"
+  LOG_LEVEL: "INFO"
+  POSTGRES_PORT: "5432"
+  POSTGRES_SSLMODE: "disable"
+  AWS_REGION: "us-east-1"
+  PAYMENT_MODE: "manual"
