@@ -45,7 +45,7 @@ func TestAuthMiddleware_TableDriven(t *testing.T) {
 			middlewareRoles:  []auth.Role{auth.CUSTOMER},
 			tokenRoles:       []auth.Role{auth.CUSTOMER},
 			tokenExpiry:      time.Now().Add(-time.Hour),
-			expectedHTTPCode: http.StatusForbidden,
+			expectedHTTPCode: http.StatusUnauthorized,
 		},
 		{
 			name:             "roles mismatch",
