@@ -31,7 +31,7 @@ jobs:
       image: ${{ steps.image.outputs.ref }}
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Configure AWS credentials (OIDC)
         if: env.AWS_AUTH_MODE == 'oidc'
@@ -79,7 +79,7 @@ jobs:
       AWS_AUTH_MODE: ${{ vars.AWS_AUTH_MODE || (secrets.AWS_ACCESS_KEY_ID != '' && 'static' || 'oidc') }}
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Configure AWS credentials (OIDC)
         if: env.AWS_AUTH_MODE == 'oidc'
