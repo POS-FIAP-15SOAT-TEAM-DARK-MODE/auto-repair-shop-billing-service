@@ -18,7 +18,7 @@ permissions:
   id-token: write
 
 env:
-  IMAGE_NAME: auto-repair-shop
+  IMAGE_NAME: auto-repair-shop-billing-service
 
 jobs:
   publish:
@@ -140,21 +140,28 @@ jobs:
       - name: Sync migrations ConfigMap
         run: |
           kubectl create namespace auto-repair-shop --dry-run=client -o yaml | kubectl apply -f -
-          kubectl create configmap db-migrations --from-file=migrations \
+          kubectl create configmap billing-service-migrations --from-file=migrations \
             -n auto-repair-shop --dry-run=client -o yaml | kubectl apply -f -
-          kubectl -n auto-repair-shop delete job db-migrate --ignore-not-found
+          kubectl -n auto-repair-shop delete job billing-service-db-migrate --ignore-not-found
 
-      - name: Provision app secret and remove legacy Ingress (lab)
+      - name: Provision app secret (lab)
         if: env.LAB_MODE == 'true'
         run: |
           SECRET_JSON=$(aws secretsmanager get-secret-value \
-            --secret-id "auto-repair-shop-${ENV_NAME}/app" \
+            --secret-id "auto-repair-shop-${ENV_NAME}/billing" \
             --region "$DEPLOY_REGION" --query SecretString --output text)
-          kubectl -n auto-repair-shop create secret generic app-secrets \
-            --from-literal=POSTGRES_PASSWORD="$(echo "$SECRET_JSON" | jq -r .POSTGRES_PASSWORD)" \
-            --from-literal=JWT_SECRET="$(echo "$SECRET_JSON" | jq -r .JWT_SECRET)" \
+          ARGS=()
+          while IFS= read -r literal; do ARGS+=("$literal"); done < <(echo "$SECRET_JSON" | jq -r 'to_entries[] | "--from-literal=\(.key)=\(.value)"')
+          kubectl -n auto-repair-shop create secret generic billing-service-secrets "${ARGS[@]}" \
             --dry-run=client -o yaml | kubectl apply -f -
-          kubectl -n auto-repair-shop delete ingress auto-repair-shop --ignore-not-found
+
+      - name: Resolve messaging endpoints
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          TOPIC_ARN="arn:aws:sns:${DEPLOY_REGION}:${ACCOUNT}:auto-repair-shop-${ENV_NAME}-billing-events"
+          QUEUE_URL="https://sqs.${DEPLOY_REGION}.amazonaws.com/${ACCOUNT}/auto-repair-shop-${ENV_NAME}-billing-queue"
+          echo "BILLING_EVENTS_TOPIC_ARN=$TOPIC_ARN" >> "$GITHUB_ENV"
+          echo "BILLING_QUEUE_URL=$QUEUE_URL" >> "$GITHUB_ENV"
 
       - name: Deploy
         run: |
@@ -163,42 +170,10 @@ jobs:
             sed -i "s#RDS_HOST_PLACEHOLDER#$DEPLOY_RDS#" "$OVERLAY/patch-configmap.yaml"
           fi
           kubectl apply -k "$OVERLAY"
-          kubectl -n auto-repair-shop patch configmap app-config --type merge \
-            -p "{\"data\":{\"POSTGRES_HOST\":\"$DEPLOY_RDS\"}}"
-          kubectl -n auto-repair-shop set image deploy/auto-repair-shop \
+          kubectl -n auto-repair-shop patch configmap billing-service-config --type merge \
+            -p "{\"data\":{\"POSTGRES_HOST\":\"$DEPLOY_RDS\",\"BILLING_QUEUE_URL\":\"$BILLING_QUEUE_URL\",\"BILLING_EVENTS_TOPIC_ARN\":\"$BILLING_EVENTS_TOPIC_ARN\"}}"
+          kubectl -n auto-repair-shop set image deploy/billing-service \
             app=${{ needs.publish.outputs.image }}
 
       - name: Wait for rollout
-        run: kubectl -n auto-repair-shop rollout status deploy/auto-repair-shop --timeout=180s
-
-      - name: Publish app URL
-        if: env.LAB_MODE == 'true'
-        run: |
-          for _ in $(seq 1 30); do
-            HOST=$(kubectl -n auto-repair-shop get svc auto-repair-shop \
-              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
-            [ -n "$HOST" ] && break
-            sleep 10
-          done
-          if [ -n "$HOST" ]; then
-            {
-              echo "### App is up"
-              echo ""
-              echo "- API: http://$HOST"
-              echo "- Health: http://$HOST/ping"
-              echo "- Swagger: http://$HOST/swagger/index.html"
-            } >> "$GITHUB_STEP_SUMMARY"
-
-            # Handoff point for auto-repair-shop-infra-k8s's gateway state:
-            # this ELB is Kubernetes-created, not Terraform-managed, so
-            # there's no terraform_remote_state output for it. SSM is the
-            # stable place the gateway's data source reads it from.
-            aws ssm put-parameter \
-              --name "/auto-repair-shop/$ENV_NAME/app-backend-host" \
-              --type String \
-              --value "$HOST" \
-              --overwrite \
-              --region "$DEPLOY_REGION"
-          else
-            echo "LoadBalancer hostname not ready yet — rerun or check the service." >> "$GITHUB_STEP_SUMMARY"
-          fi
+        run: kubectl -n auto-repair-shop rollout status deploy/billing-service --timeout=180s
