@@ -1,7 +1,7 @@
 # RFC 0001 — Mercado Pago integration (Checkout Pro)
 
-- Status: Implemented in the Mercado Pago provider change; decisions in [§10](#10-decisions-and-remaining-questions), the final design is ADR 0003. The items under "Still open" are not closed by that change.
-- Date: 2026-11-02 (revised after the sandbox proof of concept and aligned with `billing-service` `develop` @ `00f9ed3`, PR #1 merged)
+- Status: Implemented (billing-service PR #9); decisions in [§10](#10-decisions-and-remaining-questions), the final design is ADR 0003. The items under "Still open" that are not marked resolved depend on the deploy (AWS Lab) and are not closed by that change.
+- Date: 2026-11-02 (revised after the sandbox proof of concept, the live tests of the service and three reviews; aligned with `billing-service` `develop` after the onda 5 hardening, PR #10)
 - Author: Giusier F.
 - Related: billing-service PR #1, merged (`PaymentProvider` port, ADR 0002 "Billing without an external payment gateway"), service-order-service PR #1 (orchestrated saga), project decisions D11, R1, R2 and R10 (`docs/decisions.md` of `auto-repair-shop`), `mercadopago-poc` (local proof of concept, results in its README)
 
@@ -55,7 +55,7 @@ sequenceDiagram
     B->>B: Verify x-signature
     B->>MP: GET /v1/payments/{id} (source of truth)
     MP-->>B: payment + status
-    B->>B: Map status, update Payment (+ payment_event in Postgres)
+    B->>B: Map status, update Payment
     B-->>SO: PaymentApproved / PaymentFailed (outbox, same saga_id)
     B-->>MP: 200 OK
 ```
@@ -144,7 +144,7 @@ A signature built locally with the same manifest was accepted, and a wrong secre
 3. `Get(data.id)` — never trust the body.
 4. Find our `Payment` by `external_reference`; unknown → log + 200.
 5. Map status; if unchanged → no-op (`payment.webhook_duplicate`).
-6. In one transaction: apply the transition (validated by `Payment.Transition`), insert the `payment_event` row, and enqueue the saga event in the outbox with the payment's stored `saga_id` (`PaymentApproved` or `PaymentFailed`).
+6. In one transaction: apply the transition (validated by `Payment.Transition`), enqueue the saga event in the outbox with the payment's stored `saga_id` (`PaymentApproved` or `PaymentFailed`).
 7. Respond 200. Transient failures (DB/gateway, including a payment id Mercado Pago does not know) → 5xx so Mercado Pago retries.
 
 ### Mocking the webhook
@@ -183,14 +183,14 @@ The docs advise handling `topic_merchant_order_wh` notifications and processing 
 ## 8. Idempotency, resilience, reconciliation
 
 - Webhooks can repeat or arrive out of order → status application is idempotent and guarded by `Payment.Transition` (`APPROVED` is not overwritten by a late `PENDING`).
-- Outbound creates carry an idempotency key derived from `payment.id`, but **Mercado Pago does not honor it when it creates a preference**: the sandbox smoke test got two different preferences for one key. A retry therefore first searches the preferences of the same `external_reference` and reuses the newest one that has not expired (the search sees a new preference after about 3 s, shorter than the worker's retry). A crash right after the create and a retry within that window can still leave a second preference; both carry the same `external_reference`, so any payment is found and a second approval is only logged for a manual refund. [poc]
+- Outbound creates carry an idempotency key derived from `payment.id`, but **Mercado Pago does not honor it when it creates a preference**: the sandbox smoke test got two different preferences for one key. A retry therefore first searches the preferences of the same `external_reference` and reuses the newest one that has not expired (the search sees a new preference after about 3 s, shorter than the worker's retry). A crash right after the create and a retry within that window can still leave a second preference; both carry the same `external_reference`, so any payment is found, and a second approval is recorded and refunded by the worker (item 1 of "Still open"). [poc]
 - Timeouts on all calls; retry only idempotent/GET calls with backoff; 4xx = permanent, 5xx/429/timeout = transient; gateway down on `RequestPayment` → the command fails and is redelivered by SQS (then DLQ).
 - **Reconciliation job**: re-fetch `PENDING` payments with `GET /v1/payments/search?external_reference=<payment id>` and apply them through the same function as the webhook; also retry the checkout creation for payments without `external_id`. In the POC it found an approved payment and applied it with no webhook at all. An unchanged payment writes no event per tick. [poc]
 - When several payments exist for one reference, apply the approved one first, then any live attempt; a refusal is applied only when no other attempt is live (the customer may have retried after it). [poc]
 - **Fairness:** the worker stamps `payment.last_checked_at` and lists the least recently checked first (reconciliation waits 30 s between two looks at a payment), so no payment is starved by a batch limit.
 - **Error classes:** 401, 403, 408, 409, 429 and 5xx are retried; 400, 404 and 422 are permanent. A wrong or rotated token therefore never fails customers' payments; it is retried and logged.
 - A refund refused for good is not final: the payment is read first, since the refund may already exist. A payment that closed without learning its gateway payment id is searched once, and a payment still in process is cancelled.
-- **Limit: a refund or chargeback made outside Billing is not reconciled.** The job only re-fetches `PENDING` payments. A payment already `APPROVED` that is refunded elsewhere (for example from the seller's dashboard) is seen only when the webhook arrives. In the manual test against the sandbox it stayed `APPROVED` until a signed webhook for the same payment was sent, which then applied `REFUNDED` and wrote `PaymentRefunded`. The refund that comes from the saga is started by Billing itself, so it is not affected. Without a public webhook URL (AWS Lab), refunds done outside the saga go unnoticed; if that matters, also reconcile recent `APPROVED` payments within a window. [poc]
+- **Limit: a refund or chargeback made outside Billing is not reconciled.** The job only re-fetches `PENDING` payments. A payment already `APPROVED` that is refunded elsewhere (for example from the seller's dashboard) is seen only when the webhook arrives, unless the saga asked for that refund: the worker then reads the payment before it asks for the refund, so a refund made from the panel is noticed and settles the payment (found and fixed in the live test). The same read-first rule closes the record of an unsettled payment. [poc]
 
 ## 9. Saga compensation and expiry
 
@@ -200,7 +200,7 @@ The docs advise handling `topic_merchant_order_wh` notifications and processing 
 - `RefundPayment` on a `PENDING` payment → mark `CANCELLED` locally and **expire the preference**; expiring is done with `PUT /checkout/preferences/{id}` and a past `expiration_date_to`, and the checkout page then answers "O que você queria pagar não está disponível. Ficou disponível até <data>". [poc] Cancelling a gateway payment that is not approved uses `PUT /v1/payments/{id}`. [doc]
 - **On `rejected`:** expire the preference as part of replying `PaymentFailed`, so the customer cannot retry into a failed order (§7). [poc, proposal]
 - **Expiry (12 h unpaid):** Billing owns the first answer. When `expires_at` passes, the reconciliation job expires the preference and replies `PaymentFailed` (`PAYMENT_REJECTED`) if the saga is still waiting: for a checkout that never received a payment (local `CANCELLED`) and for a payment Mercado Pago still holds as `in_process`, which is first cancelled at the gateway and then rejected (decision 13; if the cancellation fails the payment stays `PENDING` and is retried, and an approval that arrives first wins). The orchestrator's `SAGA_PAYMENT_TIMEOUT` (24 h) is only a backstop, longer than the 12 h preference expiry, so a late `PaymentFailed` is ignored when the saga has already moved on. The same gateway cancellation applies when the orchestrator's `RefundPayment` arrives for such a payment. [poc]
-- Compensation is idempotent; every gateway action is appended to `payment_event`.
+- Compensation is idempotent; every gateway action is logged with an `event` name and counted (`.ai/rules/observability.md`); there is no event table.
 
 ## 10. Decisions and remaining questions
 
@@ -215,7 +215,7 @@ The docs advise handling `topic_merchant_order_wh` notifications and processing 
 | 5 | Client | Official Go SDK, wrapped by the Mercado Pago `PaymentProvider`. |
 | 6 | Payment methods | All methods. |
 | 7 | Saga style and broker | Orchestrated saga over SNS/SQS, as implemented in the bootstrap PRs. Billing only replies to the orchestrator and never changes the OS status itself. |
-| 8 | Data stores | The SQL/NoSQL requirement is read at the system level (Postgres in the services, DynamoDB in History), so Billing stays Postgres-only; `payment_event` is a Postgres table. |
+| 8 | Data stores | The SQL/NoSQL requirement is read at the system level (Postgres in the services, DynamoDB in History), so Billing stays Postgres-only; the payments are Postgres tables. |
 | 9 | Who sees the payment | The customer does **not** see the payment (project decision R10, recorded in `docs/decisions.md` of `auto-repair-shop`). `GET /v1/payments/:serviceOrderId` stays attendant and admin; the attendant hands the checkout link to the customer. |
 | 10 | Saga and contracts | Unchanged (project decision D11): Mercado Pago plugs in as a provider. The command and event contracts, including `PaymentFailed.reason = PAYMENT_REJECTED`, stay as they are. |
 | 11 | Delivery | Branch from `develop` (PR #1 is merged), pull request back to `develop`; ADR 0003 closes this RFC and supersedes the "without gateway" part of ADR 0002. |
@@ -229,14 +229,14 @@ The docs advise handling `topic_merchant_order_wh` notifications and processing 
 
 ### Still open
 
-1. **Several approved payments for one budget.** No preference was given. Default proposal, unless told otherwise: the first approved payment settles the order and any other approved one is refunded. Since a rejection now expires the checkout, two approvals can only come from two simultaneous payments, or from a split payment if Checkout Pro allows it (not confirmed: check in the AWS Lab; if it does, the sum of approved payments must settle instead). [verify]
-2. **Port change.** Agree the `ChargeResult` / two-step shape (§4) with the author of the Billing bootstrap, and write it in ADR 0003.
-3. **Refund through the API.** Find out why `POST /v1/payments/{id}/refunds` returns `401` / code 7 (credentials not activated, or a test-account limit) and whether it works in the AWS Lab with the credentials that will be used. The manual test of the Billing service reproduced it: the worker treats it as a permanent error, logs it, retries with backoff and leaves the payment `APPROVED` with no event.
+1. **Several approved payments for one budget (resolved).** The first approved payment settles the order; any other approved payment (extra) is recorded in `unsettled_payment` and refunded by the worker, and a payment approved after the order was cancelled, rejected or refunded (late) is handled the same way (item 7). Whether Checkout Pro can split one purchase into several payments is still not confirmed: check in the AWS Lab. [verify]
+2. **Port change (resolved).** The `ChargeResult` / two-step shape (§4) was reviewed by the author of the Billing bootstrap in PR #9, and the final shape is in ADR 0003.
+3. **Refund through the API.** Find out why `POST /v1/payments/{id}/refunds` returns `401` / code 7 (credentials not activated, or a test-account limit) and whether it works in the AWS Lab with the credentials that will be used. It was reproduced in the POC, in the manual test and in the live test of the unsettled-payment refund. The worker treats it as transient: it keeps retrying with a backoff, warns after 30 minutes (`payment.refund_stuck`, `refunds_pending_oldest_age_seconds`) and reads the payment before each request, so a refund made from the seller's panel closes the payment (or the unsettled record) anyway.
 4. **Which overlays use `mercadopago`.** `lab` and `stg` use `auto-approve` and `prd` uses `manual` today. The AWS Lab has no domain or certificate, so `mercadopago` there depends on the reconciler; decide per overlay.
 5. **Gateway routes.** Add the webhook route to the gateway's `config/routes.yaml` (`auto-repair-shop`), and later, if needed, the public API Gateway route in `infra-k8s`.
-6. **Secrets and config.** Add `MERCADOPAGO_ACCESS_TOKEN` and `MERCADOPAGO_WEBHOOK_SECRET` to the Secrets Manager secret `auto-repair-shop-<env>/billing` (created by `infra-db`); the ExternalSecret already extracts every key, so no manifest change is needed for secrets. `MERCADOPAGO_NOTIFICATION_URL` and the non-secret settings go in the ConfigMap and the overlays. Keep `MERCADOPAGO_CHECKOUT_TTL` (12 h by default) below the orchestrator's `SAGA_PAYMENT_TIMEOUT` (24 h in `service-order-service`); otherwise the orchestrator cancels the order (`SAGA_TIMEOUT`) and sends `RefundPayment` before Billing answers (decision 4).
-7. **Payment approved after the order was cancelled (resolved).** The webhook and the reconciliation record an approved gateway payment whose local payment is `CANCELLED` or `REJECTED` (late), or already `APPROVED` by another payment (extra), in `unsettled_payment`, and the worker refunds it and closes the record when Mercado Pago confirms; no saga event is published. An approval with another amount stays a manual review. The text below is the original problem statement. If the customer pays while the orchestrator is cancelling (or after `RefundPayment` marked the payment `CANCELLED`), Mercado Pago can still approve it. The webhook must detect an approved payment whose local status is `CANCELLED` or `REJECTED` and refund it (the POC only flags it), since `CANCELLED -> APPROVED` is not a valid transition and the orchestrator ignores a late `PaymentApproved`.
-8. **Still unconfirmed [verify]:** the real webhook payload and headers; whether test-credential payments send notifications; how Mercado Pago reports an expired preference that had no payment; the `topic_merchant_order_wh` notifications; the real cancellation of an `in_process` payment.
+6. **Secrets and config.** Add `MERCADOPAGO_ACCESS_TOKEN` and `MERCADOPAGO_WEBHOOK_SECRET` to the Secrets Manager secret `auto-repair-shop-<env>/billing` (created by `infra-db`); the ExternalSecret already extracts every key, so no manifest change is needed for secrets. `MERCADOPAGO_NOTIFICATION_URL` and the non-secret settings go in the ConfigMap and the overlays. Keep `MERCADOPAGO_CHECKOUT_TTL` (12 h by default) below the orchestrator's `SAGA_PAYMENT_TIMEOUT` (24 h in `service-order-service`); otherwise the orchestrator cancels the order (`SAGA_TIMEOUT`) and sends `RefundPayment` before Billing answers (decision 4). The worker's advisory lock needs a database connection in session mode.
+7. **Payment approved after the order was cancelled (resolved).** If the customer pays while the orchestrator is cancelling, or after `RefundPayment` marked the payment `CANCELLED`, Mercado Pago can still approve it; `CANCELLED -> APPROVED` is not a valid transition and the orchestrator ignores a late `PaymentApproved`. The webhook and the reconciliation therefore record the approved gateway payment in `unsettled_payment` (reason `LATE_APPROVAL`, or `EXTRA_APPROVAL` when another payment already settled it) in the same transaction, and the worker refunds it and closes the record when Mercado Pago confirms; no saga event is published. An approval for another amount is recorded with status `REVIEW` and left to a person. Validated live in the sandbox: the late approval was recorded, the saga was not told, and the record closed after the refund. The refund itself depends on item 3.
+8. **Still unconfirmed [verify]:** the real webhook payload and headers (the webhook was only exercised with signatures generated locally); whether test-credential payments send notifications; how Mercado Pago reports an expired preference that had no payment; the `topic_merchant_order_wh` notifications; the real cancellation of an `in_process` payment. Already confirmed in the sandbox: payments are found by `external_reference` and approved without any webhook, the preference search sees a new preference after about 3 s, and Mercado Pago ignores the idempotency key when it creates a preference.
 
 ## 11. Where this plugs into the current code
 

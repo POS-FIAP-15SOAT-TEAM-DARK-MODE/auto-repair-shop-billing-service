@@ -28,15 +28,27 @@ Invalid payloads return an error, so the message goes to the DLQ after 5 receive
 `GET /v1/payments/:serviceOrderId` and gives the link to the customer. Design: ADR 0003 (options and sandbox
 results: RFC 0001). The service refuses to start without the access token.
 
+How a payment goes:
+1. `RequestPayment` only records a `PENDING` payment with an expiry (`expires_at`). No remote call happens in the command.
+2. The **gateway worker** opens the checkout, reconciles pending payments with Mercado Pago, expires unpaid checkouts, requests refunds and closes the checkout of finished payments. Every remote call is outside a database transaction.
+3. The payment settles when Mercado Pago approves, rejects or the checkout expires, through the **webhook** (signed, never trusted for payment data) or the reconciliation, which also works without a public URL.
+4. A refund asked by the saga is requested at Mercado Pago, and `PaymentRefunded` is sent once the gateway confirms it. A refund made from the seller's panel is noticed too.
+5. A customer who pays a link whose payment was already cancelled, rejected or refunded, or who pays twice, is recorded in `unsettled_payment` and **refunded by the worker**; the saga is not told. An approval for another amount is recorded with status `REVIEW` and needs a person: it is never refunded automatically.
+
+With several replicas only one runs the worker at a time (a Postgres advisory lock, which needs a connection in session mode). Migrations `000002` to `000005` add the gateway columns, `last_checked_at`, `unsettled_payment` and the worker indexes.
+
 | Variable | Meaning |
 |---|---|
 | `MERCADOPAGO_ACCESS_TOKEN` | required; the long `APP_USR-...` token of the seller (test) account |
 | `MERCADOPAGO_WEBHOOK_SECRET` | signs the webhook; empty rejects every webhook (payments then settle through the worker) |
 | `MERCADOPAGO_NOTIFICATION_URL` | public HTTPS URL of `POST /v1/webhooks/mercadopago`; empty means "do not send" |
 | `MERCADOPAGO_CHECKOUT_TTL` | lifetime of a checkout, default `12h` (keep it below the orchestrator's `SAGA_PAYMENT_TIMEOUT`, `24h`) |
+| `MERCADOPAGO_WEBHOOK_TOLERANCE` | accepted distance between the signature timestamp and now, default `5m` |
 | `GATEWAY_WORKER_INTERVAL` | how often the gateway worker runs, default `5s` |
 
-Tests use a fake SDK transport and never call Mercado Pago.
+What to watch (`/metrics`, details in `.ai/rules/observability.md`): `refunds_pending_oldest_age_seconds` (a refund the gateway never confirmed; alert past about 30 minutes), `payments_unsettled_total{reason="amount_mismatch"}` (needs a person), `gateway_worker_passes_total{result="ran"}` (alert if no replica runs) and `gateway_requests_total{outcome!="ok"}`.
+
+Known limit: the refund through the Mercado Pago API answers `401` ("Unauthorized use of live credentials") in the sandbox, so refunds are retried with a backoff until the gateway reports them refunded (for example after a refund from the seller's panel). Tests use a fake SDK transport and never call Mercado Pago; `make test-sandbox` is the opt-in exception.
 
 ## REST API
 | Route | Roles |
@@ -71,12 +83,14 @@ Measured with `go test ./... -coverprofile` (statement coverage, no generated co
 
 | Package | Coverage |
 |---|---|
-| **Total** | **92.1%** |
+| **Total** | **92.7%** |
 | `internal/budget`, `internal/budget/repository` | 100.0% |
 | `internal/payment`, `internal/payment/repository` | 100.0% |
-| `internal/billing` | 94.4% |
+| `internal/payment/mercadopago` | 99.2% |
+| `internal/billing` | 94.3% |
 | `internal/pkg/messaging` | 97.5% |
-| `internal/app/routing` | 87.0% |
+| `internal/pkg/db/postgres` | 97.3% |
+| `internal/app/routing` | 90.9% |
 
 CI enforces 80% total and 90% for `internal/budget` and `internal/payment` (`coverage` job in `.github/workflows/ci.yml`).
 `cmd/service` has no tests and is included in the total at 0%.
