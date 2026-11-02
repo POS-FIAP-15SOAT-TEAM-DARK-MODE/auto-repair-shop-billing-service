@@ -17,7 +17,6 @@ type queryBuilder struct {
 	offset         int64
 	orderField     string
 	orderDirection OrderDirection
-	rawOrderExpr   string
 }
 
 type OrderDirection string
@@ -83,25 +82,6 @@ func (q *queryBuilder) OrderBy(field string, direction OrderDirection) *queryBui
 	return q
 }
 
-// AddNotIn adds "field NOT IN ($N)" to the WHERE clause using a PostgreSQL array parameter.
-// Skipped when values is empty — safe to call unconditionally for optional filters.
-func (q *queryBuilder) AddNotIn(field string, values []string) *queryBuilder {
-	if len(values) == 0 {
-		return q
-	}
-	q.counter++
-	q.conditions = append(q.conditions, fmt.Sprintf("%s != ALL($%d)", field, q.counter))
-	q.args = append(q.args, pq.Array(values))
-	return q
-}
-
-// OrderByRaw sets a raw ORDER BY expression (e.g. a CASE statement).
-// When set, this takes precedence over OrderBy.
-func (q *queryBuilder) OrderByRaw(expr string) *queryBuilder {
-	q.rawOrderExpr = expr
-	return q
-}
-
 func (q *queryBuilder) Build() (string, []any) {
 	var sb strings.Builder
 	sb.WriteString(q.baseQuery)
@@ -121,9 +101,7 @@ func (q *queryBuilder) Build() (string, []any) {
 		sb.WriteString(strings.Join(q.groupByFields, ", "))
 	}
 
-	if q.rawOrderExpr != "" {
-		sb.WriteString(fmt.Sprintf(" ORDER BY %s", q.rawOrderExpr))
-	} else if q.orderField != "" {
+	if q.orderField != "" {
 		if q.orderDirection == "" {
 			q.orderDirection = ASC
 		}
