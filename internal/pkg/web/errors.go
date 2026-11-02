@@ -99,7 +99,8 @@ func isNotFoundError(err error) bool {
 func isConflictError(err error) bool {
 	return errors.Is(err, app.ErrDataConflict) ||
 		errors.Is(err, app.ErrInfraConflict) ||
-		errors.Is(err, payment.ErrInvalidTransition)
+		errors.Is(err, payment.ErrInvalidTransition) ||
+		errors.Is(err, payment.ErrGatewayManaged)
 }
 
 func isUnprocessableEntityError(err error) bool {

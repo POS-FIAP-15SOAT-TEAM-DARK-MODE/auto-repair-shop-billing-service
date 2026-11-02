@@ -31,6 +31,9 @@ const ProviderMercadoPago = "mercadopago"
 var (
 	ErrNotFound          = errors.New("payment not found")
 	ErrInvalidTransition = errors.New("invalid payment status transition")
+	// ErrGatewayManaged is returned when the attendant tries to confirm or reject a payment that has a
+	// checkout at the gateway: the gateway is the source of truth for its status.
+	ErrGatewayManaged = errors.New("payment is managed by the payment gateway")
 )
 
 // allowed lists the valid next states of each status.
