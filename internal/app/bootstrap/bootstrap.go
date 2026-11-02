@@ -37,12 +37,22 @@ func Servers() []app.Server {
 		idGen.NewUUID,
 	)
 
+	controller := billing.NewController(service)
+	var gatewayWorkers []app.Server
+	if mode == payment.ModeMercadoPago {
+		controller, gatewayWorkers, err = gatewayMode(service)
+		if err != nil {
+			logger.Global().Fatal("invalid configuration", zap.Error(err))
+		}
+	}
+
 	router := routing.SetupRouter(
-		&container.HandlersWrapper{Billing: billing.NewController(service)},
+		&container.HandlersWrapper{Billing: controller},
 		middlewaresContainer(),
 	)
 
 	servers := []app.Server{app.NewHTTPServer("http-api", ":"+env.GetString("PORT", "8083"), router)}
+	servers = append(servers, gatewayWorkers...)
 	return append(servers, messagingWorkers(database, service)...)
 }
 
