@@ -438,40 +438,53 @@ func (s *Service) expire(ctx context.Context, p *payment.Payment) error {
 }
 
 // refund asks the gateway to refund an approved payment and settles it only once the gateway says so.
-// A permanent refusal is not final: the refund may already exist (made from the seller's panel, or in an
-// earlier run past the idempotency window), so the payment is read before giving up.
+// The payment is read first: the gateway may already have refunded it (from the seller's panel), and a
+// refund request that keeps being refused (the sandbox answers 401, which counts as transient) must not
+// hide that. A permanent refusal is not final either, for the same reason.
 func (s *Service) refund(ctx context.Context, p *payment.Payment) error {
 	if p.GatewayPaymentID == "" {
 		return errors.New("refund requested for a payment without a gateway payment id")
+	}
+	if done, err := s.settleRefund(ctx, p); err != nil || done {
+		return err
 	}
 	var refundErr error
 	if !s.retry.refundSubmitted(p.ID) {
 		if err := s.gateway.Refund(ctx, p.GatewayPaymentID); err != nil {
 			if payment.IsTransient(err) {
+				s.warnIfRefundIsStuck(ctx, p)
 				return err
 			}
 			refundErr = err
 		} else {
 			s.retry.markRefundSubmitted(p.ID)
+			if done, err := s.settleRefund(ctx, p); err != nil || done { // usually confirmed at once
+				return err
+			}
 		}
 	}
+	s.warnIfRefundIsStuck(ctx, p)
+	if refundErr != nil {
+		return refundErr
+	}
+	return errNotYet
+}
+
+// settleRefund reads the payment at the gateway and applies it. It reports whether it is refunded.
+func (s *Service) settleRefund(ctx context.Context, p *payment.Payment) (bool, error) {
 	gp, err := s.gateway.GetPayment(ctx, p.GatewayPaymentID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	gp.ExternalReference = p.ID
 	if _, err := s.ApplyGatewayPayment(ctx, gp); err != nil {
-		return err
+		return false, err
 	}
-	if st, ok := payment.MapGatewayStatus(gp.Status); !ok || st != payment.StatusRefunded {
-		s.warnIfRefundIsStuck(ctx, p)
-		if refundErr != nil {
-			return refundErr
-		}
-		return errNotYet
+	if st, ok := payment.MapGatewayStatus(gp.Status); ok && st == payment.StatusRefunded {
+		s.retry.forgetRefund(p.ID)
+		return true, nil
 	}
-	s.retry.forgetRefund(p.ID)
-	return nil
+	return false, nil
 }
 
 // warnIfRefundIsStuck logs, at warning level, a refund that Mercado Pago has not confirmed after
@@ -533,37 +546,56 @@ func (s *Service) refundUnsettled(ctx context.Context, now time.Time) {
 }
 
 // refundOneUnsettled asks the gateway to refund the payment and closes the record only once the gateway
-// says the money is no longer held. A permanent refusal is not final: the refund may already exist.
+// says the money is no longer held. Like refund, it reads the payment first, so a refund already made at
+// the gateway closes the record even while the refund request keeps being refused.
 func (s *Service) refundOneUnsettled(ctx context.Context, u *payment.Unsettled) error {
+	if done, err := s.unsettledIsRefunded(ctx, u); err != nil || done {
+		return err
+	}
 	var refundErr error
 	if !s.retry.refundSubmitted(u.GatewayPaymentID) {
 		if err := s.gateway.Refund(ctx, u.GatewayPaymentID); err != nil {
 			if payment.IsTransient(err) {
+				s.warnUnsettledIsStuck(ctx, u)
 				return err
 			}
 			refundErr = err
 		} else {
 			s.retry.markRefundSubmitted(u.GatewayPaymentID)
+			if done, err := s.unsettledIsRefunded(ctx, u); err != nil || done { // usually confirmed at once
+				return err
+			}
 		}
 	}
-	gp, err := s.gateway.GetPayment(ctx, u.GatewayPaymentID)
-	if err != nil {
-		return err
-	}
-	if st, ok := payment.MapGatewayStatus(gp.Status); ok && (st == payment.StatusRefunded || st == payment.StatusRejected || st == payment.StatusCancelled) {
-		if err := s.payments.MarkUnsettledRefunded(ctx, s.db, u.GatewayPaymentID, s.now()); err != nil {
-			return err
-		}
-		s.retry.forgetRefund(u.GatewayPaymentID)
-		logger.Of(ctx).Info("unsettled payment refunded", zap.String("event", "payment.unsettled_refunded"),
-			zap.String("payment_id", u.PaymentID), zap.String("gateway_payment_id", u.GatewayPaymentID), zap.String("reason", string(u.Reason)))
-		return nil
-	}
-	s.warnRefundStuck(ctx, u.CreatedAt, zap.String("payment_id", u.PaymentID), zap.String("gateway_payment_id", u.GatewayPaymentID), zap.String("reason", string(u.Reason)))
+	s.warnUnsettledIsStuck(ctx, u)
 	if refundErr != nil {
 		return refundErr
 	}
 	return errNotYet
+}
+
+func (s *Service) warnUnsettledIsStuck(ctx context.Context, u *payment.Unsettled) {
+	s.warnRefundStuck(ctx, u.CreatedAt, zap.String("payment_id", u.PaymentID), zap.String("gateway_payment_id", u.GatewayPaymentID), zap.String("reason", string(u.Reason)))
+}
+
+// unsettledIsRefunded reads the payment at the gateway and, when the money is no longer held (refunded,
+// or never captured), closes the record. It reports whether it did.
+func (s *Service) unsettledIsRefunded(ctx context.Context, u *payment.Unsettled) (bool, error) {
+	gp, err := s.gateway.GetPayment(ctx, u.GatewayPaymentID)
+	if err != nil {
+		return false, err
+	}
+	st, ok := payment.MapGatewayStatus(gp.Status)
+	if !ok || (st != payment.StatusRefunded && st != payment.StatusRejected && st != payment.StatusCancelled) {
+		return false, nil
+	}
+	if err := s.payments.MarkUnsettledRefunded(ctx, s.db, u.GatewayPaymentID, s.now()); err != nil {
+		return false, err
+	}
+	s.retry.forgetRefund(u.GatewayPaymentID)
+	logger.Of(ctx).Info("unsettled payment refunded", zap.String("event", "payment.unsettled_refunded"),
+		zap.String("payment_id", u.PaymentID), zap.String("gateway_payment_id", u.GatewayPaymentID), zap.String("reason", string(u.Reason)))
+	return true, nil
 }
 
 // closeCheckout makes the checkout of a finished payment unpayable, and cancels a gateway payment

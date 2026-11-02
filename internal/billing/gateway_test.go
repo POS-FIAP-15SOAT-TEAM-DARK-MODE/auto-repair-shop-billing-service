@@ -38,6 +38,7 @@ type fakeGateway struct {
 
 	refundErr error
 	refunded  []string
+	onRefund  func(id string) // what the gateway does when asked to refund
 	cancelErr error
 	cancelled []string
 	expireErr error
@@ -64,6 +65,9 @@ func (f *fakeGateway) GetPayment(_ context.Context, id string) (payment.GatewayP
 }
 func (f *fakeGateway) Refund(_ context.Context, id string) error {
 	f.refunded = append(f.refunded, id)
+	if f.onRefund != nil && f.refundErr == nil {
+		f.onRefund(id)
+	}
 	return f.refundErr
 }
 func (f *fakeGateway) CancelPayment(_ context.Context, id string) error {
@@ -507,8 +511,10 @@ func TestGateway_RefundCommandOnAnApprovedPaymentWaitsForTheGateway(t *testing.T
 	assert.True(t, g.reload().RefundRequestedAt.Equal(first))
 
 	// the worker refunds at the gateway and settles once the gateway reports it refunded
-	g.gw.byID["1001"] = gp("1001", "refunded", "221")
-	g.tx(1) // PaymentRefunded
+	g.gw.byID["1001"] = gp("1001", "approved", "221")
+	g.gw.onRefund = func(id string) { g.gw.byID[id] = gp(id, "refunded", "221") }
+	g.tx(0) // the first read: not refunded yet
+	g.tx(1) // the read after the request: PaymentRefunded
 	g.tx(0) // close the checkout
 	g.svc.ProcessGatewayWork(context.Background())
 
@@ -548,7 +554,9 @@ func TestGateway_RefundRefusedKeepsThePaymentApproved(t *testing.T) {
 		requested := t0
 		p.RefundRequestedAt = &requested
 	})
-	g.gw.refundErr = permanent // the 401 seen in the sandbox
+	g.gw.refundErr = permanent // refused for good
+	g.gw.byID["1001"] = gp("1001", "approved", "221")
+	g.tx(0) // the payment is read before the request
 
 	g.svc.ProcessGatewayWork(context.Background())
 	assert.Equal(t, payment.StatusApproved, g.reload().Status)
@@ -556,6 +564,47 @@ func TestGateway_RefundRefusedKeepsThePaymentApproved(t *testing.T) {
 
 	g.svc.ProcessGatewayWork(context.Background()) // backing off
 	assert.Len(t, g.gw.refunded, 1)
+	g.assertDB()
+}
+
+func TestGateway_ARefundAlreadyDoneAtTheGatewayIsSettledEvenWhileTheRequestIsRefused(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) {
+		withCheckout(p)
+		p.Status, p.GatewayPaymentID = payment.StatusApproved, "1001"
+		requested := t0
+		p.RefundRequestedAt = &requested
+	})
+	g.gw.refundErr = transient                        // the sandbox answers 401 to every refund request
+	g.gw.byID["1001"] = gp("1001", "refunded", "221") // but the seller refunded it from the panel
+	g.tx(1)                                           // PaymentRefunded
+	g.tx(0)                                           // close the checkout
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, payment.StatusRefunded, g.reload().Status, "the payment is read before the request, so the refusal cannot hide it")
+	assert.Empty(t, g.gw.refunded, "nothing left to refund")
+	g.assertDB()
+}
+
+func TestGateway_ARefundRefusedAsTransientStillWarnsOnceItIsStuck(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) {
+		withCheckout(p)
+		p.Status, p.GatewayPaymentID = payment.StatusApproved, "1001"
+		requested := t0
+		p.RefundRequestedAt = &requested
+	})
+	g.gw.refundErr = transient
+	g.gw.byID["1001"] = gp("1001", "approved", "221")
+	g.now = t0.Add(time.Hour)
+	g.tx(0)
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Contains(t, eventsOf(logs), "payment.refund_stuck")
+	g.assertDB()
 }
 
 func TestGateway_RefundWithoutAGatewayPaymentIdIsAnError(t *testing.T) {
@@ -990,7 +1039,8 @@ func TestGateway_MetricsCountWorkerErrorsByKind(t *testing.T) {
 		p.RefundRequestedAt = &requested
 	})
 	g2.gw.byID["1001"] = gp("1001", "approved", "221")
-	g2.tx(0)
+	g2.tx(0) // the read before the request
+	g2.tx(0) // the read after it
 	waiting := testutil.ToFloat64(metrics.GatewayWorkerErrors.WithLabelValues("REFUND", "transient"))
 	g2.svc.ProcessGatewayWork(context.Background())
 	assert.Equal(t, waiting, testutil.ToFloat64(metrics.GatewayWorkerErrors.WithLabelValues("REFUND", "transient")))
@@ -1402,5 +1452,35 @@ func TestGateway_AReconciledSecondApprovalIsScheduledNotReportedAsAFailure(t *te
 	assert.NoError(t, err, "a handled extra approval is not an error of the step")
 	assert.Equal(t, payment.StatusApproved, g.reload().Status)
 	assert.Equal(t, 1, pendingUnsettled(g))
+	g.assertDB()
+}
+
+func TestGateway_AnUnsettledPaymentRefundedAtTheGatewayIsClosedEvenWhileTheRequestIsRefused(t *testing.T) {
+	g := newGatewayHarness(t)
+	scheduleUnsettled(g, "1001", payment.UnsettledLateApproval, t0)
+	g.tx(0)
+	g.gw.refundErr = transient                        // the sandbox 401
+	g.gw.byID["1001"] = gp("1001", "refunded", "221") // refunded from the seller's panel
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Zero(t, pendingUnsettled(g))
+	assert.Empty(t, g.gw.refunded, "nothing left to refund")
+	g.assertDB()
+}
+
+func TestGateway_AnUnsettledRefundRefusedAsTransientWarnsOnceItIsStuck(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	scheduleUnsettled(g, "1001", payment.UnsettledLateApproval, t0)
+	g.tx(0)
+	g.gw.refundErr = transient
+	g.gw.byID["1001"] = gp("1001", "approved", "221")
+	g.now = t0.Add(time.Hour)
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, 1, pendingUnsettled(g))
+	assert.Contains(t, eventsOf(logs), "payment.refund_stuck")
 	g.assertDB()
 }

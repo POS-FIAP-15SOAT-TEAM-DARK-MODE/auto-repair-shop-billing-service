@@ -79,6 +79,10 @@ not hold the database transaction of a command. The saga, its message contracts 
   checkout is stored, a retried creation first reuses the open preference, and closing a payment that has no
   stored checkout asks the gateway for it (`FindCheckout`) and expires what it finds. The creation step does
   not stamp `last_checked_at`, so a payment whose creation keeps failing is still reconciled.
+- A refund reads the payment at the gateway before it asks for one. The sandbox answers `401` to every refund
+  request, which is classified as transient and retried; reading first lets a refund made from the seller's
+  panel settle the payment (or close the unsettled record) without a webhook, and makes the stuck-refund warning
+  fire even while the request is refused. The live test of the unsettled-payment refund found this.
 - The replicas take turns: each worker pass starts with a Postgres advisory lock (`pg_try_advisory_lock`, no
   waiting). The replica that gets it runs the pass and the others skip it (`gateway_worker_passes_total`).
   Without it every replica would list the same payments, and two replicas opening the checkout of one
