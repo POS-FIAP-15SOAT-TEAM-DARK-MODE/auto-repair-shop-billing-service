@@ -1048,3 +1048,77 @@ func TestGateway_NotApplicablePaymentsAreLoggedWithAReason(t *testing.T) {
 	assert.ElementsMatch(t, []any{"status_not_mapped", "unknown_payment"}, reasons)
 	g.assertDB()
 }
+
+// ---- work lock ----
+
+type fakeLock struct {
+	ok       bool
+	err      error
+	tried    int
+	released int
+}
+
+func (f *fakeLock) TryLock(context.Context) (func(), bool, error) {
+	f.tried++
+	if f.err != nil || !f.ok {
+		return nil, false, f.err
+	}
+	return func() { f.released++ }, true, nil
+}
+
+func passes(result string) float64 {
+	return testutil.ToFloat64(metrics.GatewayWorkerPasses.WithLabelValues(result))
+}
+
+func TestGateway_APassWithoutTheLockDoesNothing(t *testing.T) {
+	g := newGatewayHarness(t)
+	lock := &fakeLock{ok: false}
+	g.svc.workLock = lock
+	g.seedGatewayPayment(nil) // would get its checkout opened
+	skipped := passes("skipped")
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, 1, lock.tried)
+	assert.Empty(t, g.gw.created, "another replica is running this pass")
+	assert.Equal(t, skipped+1, passes("skipped"))
+	g.assertDB()
+}
+
+func TestGateway_APassWithTheLockRunsAndGivesItBack(t *testing.T) {
+	g := newGatewayHarness(t)
+	lock := &fakeLock{ok: true}
+	g.svc.workLock = lock
+	g.seedGatewayPayment(nil)
+	ran := passes("ran")
+	g.tx(0)
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Len(t, g.gw.created, 1)
+	assert.Equal(t, 1, lock.released, "the lock goes back even though the pass did work")
+	assert.Equal(t, ran+1, passes("ran"))
+	g.assertDB()
+}
+
+func TestGateway_ALockThatCannotBeAskedSkipsThePassAndIsCounted(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	g.svc.workLock = &fakeLock{err: errors.New("db down")}
+	g.seedGatewayPayment(nil)
+	failed := passes("error")
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Empty(t, g.gw.created)
+	assert.Equal(t, failed+1, passes("error"))
+	entry := eventsOf(logs)["gateway.worker_failed"]
+	assert.Equal(t, "LOCK", entry.ContextMap()["step"])
+}
+
+func TestGateway_WithGatewayKeepsTheWorkLock(t *testing.T) {
+	g := newGatewayHarness(t)
+	lock := &fakeLock{ok: true}
+	g.svc.WithGateway(GatewayConfig{Gateway: g.gw, WorkLock: lock})
+	assert.Same(t, lock, g.svc.workLock)
+}

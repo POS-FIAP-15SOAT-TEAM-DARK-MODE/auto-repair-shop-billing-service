@@ -31,6 +31,7 @@ type Service struct {
 	gateway         payment.Gateway
 	notificationURL string
 	checkoutTTL     time.Duration
+	workLock        WorkLock
 	retry           retryState
 }
 

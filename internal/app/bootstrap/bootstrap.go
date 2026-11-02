@@ -40,7 +40,7 @@ func Servers() []app.Server {
 	controller := billing.NewController(service)
 	var gatewayWorkers []app.Server
 	if mode == payment.ModeMercadoPago {
-		controller, gatewayWorkers, err = gatewayMode(service)
+		controller, gatewayWorkers, err = gatewayMode(service, database)
 		if err != nil {
 			logger.Global().Fatal("invalid configuration", zap.Error(err))
 		}

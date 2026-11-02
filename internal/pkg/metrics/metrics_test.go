@@ -16,10 +16,11 @@ func TestMetricsAreRegisteredWithLintCleanNames(t *testing.T) {
 	GatewayRequestDuration.WithLabelValues("get_payment")
 	GatewayWorkerErrors.WithLabelValues("REFUND", "transient")
 	PaymentsUnsettled.WithLabelValues("amount_mismatch")
+	GatewayWorkerPasses.WithLabelValues("ran")
 
 	problems, err := testutil.GatherAndLint(prometheus.DefaultGatherer,
 		"payment_status_changes_total", "gateway_requests_total", "gateway_request_duration_seconds",
-		"gateway_worker_errors_total", "payments_pending", "payments_pending_oldest_age_seconds", "payments_unsettled_total")
+		"gateway_worker_errors_total", "gateway_worker_passes_total", "payments_pending", "payments_pending_oldest_age_seconds", "payments_unsettled_total")
 	require.NoError(t, err)
 	assert.Empty(t, problems)
 }

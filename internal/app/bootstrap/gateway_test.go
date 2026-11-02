@@ -20,7 +20,7 @@ func newService() *billing.Service {
 
 func TestGatewayMode_RequiresTheAccessToken(t *testing.T) {
 	t.Setenv("MERCADOPAGO_ACCESS_TOKEN", "")
-	_, _, err := gatewayMode(newService())
+	_, _, err := gatewayMode(newService(), nil)
 	assert.EqualError(t, err, "MERCADOPAGO_ACCESS_TOKEN is required when PAYMENT_MODE=mercadopago")
 }
 
@@ -31,7 +31,7 @@ func TestGatewayMode_WiresTheWebhookAndTheWorker(t *testing.T) {
 	t.Setenv("MERCADOPAGO_CHECKOUT_TTL", "24h")
 	t.Setenv("GATEWAY_WORKER_INTERVAL", "1s")
 
-	controller, servers, err := gatewayMode(newService())
+	controller, servers, err := gatewayMode(newService(), nil)
 	require.NoError(t, err)
 	assert.True(t, controller.WebhookEnabled())
 	require.Len(t, servers, 1)
@@ -41,7 +41,7 @@ func TestGatewayMode_WiresTheWebhookAndTheWorker(t *testing.T) {
 func TestGatewayMode_AnEmptyWebhookSecretStillStartsAndRejectsWebhooks(t *testing.T) {
 	t.Setenv("MERCADOPAGO_ACCESS_TOKEN", "TEST-token")
 	t.Setenv("MERCADOPAGO_WEBHOOK_SECRET", "")
-	controller, _, err := gatewayMode(newService())
+	controller, _, err := gatewayMode(newService(), nil)
 	require.NoError(t, err)
 	assert.True(t, controller.WebhookEnabled(), "the route exists; the verifier refuses every call")
 }

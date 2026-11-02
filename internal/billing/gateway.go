@@ -29,6 +29,19 @@ type GatewayConfig struct {
 	Gateway         payment.Gateway
 	NotificationURL string        // public HTTPS URL of the webhook; empty means "do not send"
 	CheckoutTTL     time.Duration // lifetime of a checkout (12 h by default)
+	// WorkLock keeps the replicas from running the worker at the same time. Nil means no coordination,
+	// which is only right for a single instance and for tests.
+	WorkLock WorkLock
+}
+
+// WorkLock lets only one replica run a pass of the gateway worker at a time. Without it every replica
+// would list the same payments and call the gateway for each one, and two replicas opening the checkout
+// of the same payment leave a second, payable preference behind (Mercado Pago ignores the idempotency
+// key when it creates one).
+type WorkLock interface {
+	// TryLock does not wait. ok is false when another replica holds the lock; when it is true, release
+	// must be called once the pass is over.
+	TryLock(ctx context.Context) (release func(), ok bool, err error)
 }
 
 // WithGateway enables the gateway mode: RequestPayment records a PENDING payment and the gateway
@@ -37,6 +50,7 @@ func (s *Service) WithGateway(cfg GatewayConfig) *Service {
 	s.gateway = cfg.Gateway
 	s.notificationURL = cfg.NotificationURL
 	s.checkoutTTL = cfg.CheckoutTTL
+	s.workLock = cfg.WorkLock
 	if s.checkoutTTL <= 0 {
 		s.checkoutTTL = defaultCheckTTL
 	}
@@ -183,6 +197,20 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 	if s.gateway == nil {
 		return
 	}
+	if s.workLock != nil {
+		release, ok, err := s.workLock.TryLock(ctx)
+		switch {
+		case err != nil:
+			metrics.GatewayWorkerPasses.WithLabelValues("error").Inc()
+			logger.Of(ctx).Error(fmt.Errorf("work lock: %w", err), zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", "LOCK"))
+			return
+		case !ok:
+			metrics.GatewayWorkerPasses.WithLabelValues("skipped").Inc() // another replica is running this pass
+			return
+		}
+		defer release()
+	}
+	metrics.GatewayWorkerPasses.WithLabelValues("ran").Inc()
 	now := s.now()
 	steps := []struct {
 		kind payment.WorkKind

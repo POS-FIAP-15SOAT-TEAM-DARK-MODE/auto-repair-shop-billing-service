@@ -72,5 +72,12 @@ not hold the database transaction of a command. The saga, its message contracts 
   expiry does not cancel a payment the customer was charged for), while another matching approval is still
   applied. A checkout that never opened expires locally without asking the gateway. Only a 404 makes a
   notification "unknown" (200); other refusals make Mercado Pago retry.
+- The replicas take turns: each worker pass starts with a Postgres advisory lock (`pg_try_advisory_lock`, no
+  waiting). The replica that gets it runs the pass and the others skip it (`gateway_worker_passes_total`).
+  Without it every replica would list the same payments, and two replicas opening the checkout of one
+  payment would leave a second payable preference, because Mercado Pago ignores the idempotency key when
+  it creates one. The lock belongs to the session, so it never holds a transaction open during a remote
+  call, and it is released if the replica dies. `FOR UPDATE SKIP LOCKED` was not used: it would keep the row
+  locked during the call.
 - The backoff and the "refund already submitted" marker live in memory. After a restart a step simply runs
   again, which is safe because the gateway calls are idempotent.

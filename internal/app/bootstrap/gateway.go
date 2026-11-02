@@ -2,15 +2,20 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/app"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/billing"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment/mercadopago"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/db/postgres"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/env"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/logger"
 )
+
+// gatewayWorkerLockKey identifies the advisory lock the replicas share to run the gateway worker one at a time.
+const gatewayWorkerLockKey int64 = 0x42494c4c47574b52 // "BILLGWKR"
 
 // gatewayMode wires the mercadopago mode from the environment: the Mercado Pago gateway, the webhook
 // verifier and the gateway worker. It fails when the access token is missing, so the service never
@@ -22,7 +27,7 @@ import (
 //	MERCADOPAGO_CHECKOUT_TTL       lifetime of a checkout (default 12h)
 //	MERCADOPAGO_WEBHOOK_TOLERANCE  accepted distance of the signature timestamp (default 5m)
 //	GATEWAY_WORKER_INTERVAL        how often the worker runs (default 5s)
-func gatewayMode(service *billing.Service) (*billing.Controller, []app.Server, error) {
+func gatewayMode(service *billing.Service, database *sql.DB) (*billing.Controller, []app.Server, error) {
 	token := env.GetString("MERCADOPAGO_ACCESS_TOKEN", "")
 	if token == "" {
 		return nil, nil, errors.New("MERCADOPAGO_ACCESS_TOKEN is required when PAYMENT_MODE=mercadopago")
@@ -40,6 +45,7 @@ func gatewayMode(service *billing.Service) (*billing.Controller, []app.Server, e
 		Gateway:         mercadopago.Instrument(gateway),
 		NotificationURL: env.GetString("MERCADOPAGO_NOTIFICATION_URL", ""),
 		CheckoutTTL:     env.GetTimeDuration("MERCADOPAGO_CHECKOUT_TTL", 12*time.Hour),
+		WorkLock:        postgres.NewAdvisoryLock(database, gatewayWorkerLockKey),
 	})
 	controller := billing.NewController(service).WithWebhook(mercadopago.Verifier{
 		Secret:    secret,

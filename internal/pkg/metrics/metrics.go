@@ -60,6 +60,17 @@ var (
 		[]string{"step", "kind"},
 	)
 
+	// GatewayWorkerPasses counts the passes of the gateway worker by result: "ran", "skipped" (another
+	// replica holds the work lock) or "error" (the lock could not be asked). A replica that always skips
+	// is healthy; all replicas skipping, or "error", means no one is doing the work.
+	GatewayWorkerPasses = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gateway_worker_passes_total",
+			Help: "Passes of the gateway worker, by result (ran, skipped, error).",
+		},
+		[]string{"result"},
+	)
+
 	// PaymentsPending and PaymentsPendingOldestAge describe the Mercado Pago payments waiting for the
 	// customer or the gateway; the worker refreshes them on every pass.
 	PaymentsPending = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -85,5 +96,5 @@ var (
 
 func init() {
 	prometheus.MustRegister(HTTPRequestDuration, OutboxPending, PaymentStatusChanges, GatewayRequests, GatewayRequestDuration,
-		GatewayWorkerErrors, PaymentsPending, PaymentsPendingOldestAge, PaymentsUnsettled)
+		GatewayWorkerErrors, GatewayWorkerPasses, PaymentsPending, PaymentsPendingOldestAge, PaymentsUnsettled)
 }

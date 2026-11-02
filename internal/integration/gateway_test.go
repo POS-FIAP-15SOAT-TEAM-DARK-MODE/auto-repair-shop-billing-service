@@ -31,6 +31,7 @@ import (
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment/mercadopago"
 	paymentRepo "github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment/repository"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/db/postgres"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/id"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/messaging"
 )
@@ -40,6 +41,7 @@ type memGateway struct {
 	mu       sync.Mutex
 	payments map[string]payment.GatewayPayment
 	created  int
+	delay    time.Duration // how long a CreateCheckout takes, like a remote call
 }
 
 func newMemGateway() *memGateway { return &memGateway{payments: map[string]payment.GatewayPayment{}} }
@@ -51,6 +53,7 @@ func (g *memGateway) put(p payment.GatewayPayment) {
 }
 
 func (g *memGateway) CreateCheckout(_ context.Context, r payment.CheckoutRequest) (payment.Checkout, error) {
+	time.Sleep(g.delay)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.created++
@@ -126,6 +129,11 @@ func setupGateway(t *testing.T) *gwEnv {
 	require.NoError(t, budgetRepo.NewPostgres().Create(ctx, db, b))
 	e.budget = b
 	return e
+}
+
+// newReplica is a second instance of the service on the same database, like another pod.
+func (e *gwEnv) newReplica() *billing.Service {
+	return billing.NewService(e.db, budgetRepo.NewPostgres(), paymentRepo.NewPostgres(), payment.NewInternalProvider(payment.ModeManual), id.NewIDGenerator().NewUUID)
 }
 
 // pass lets the reconciliation interval go by, then runs one pass of the gateway worker.
@@ -372,4 +380,47 @@ func TestGateway_PendingStatsOnPostgres(t *testing.T) {
 	assert.Equal(t, 1, got.Count)
 	require.NotNil(t, got.Oldest)
 	assert.WithinDuration(t, time.Now(), *got.Oldest, time.Minute)
+}
+
+func TestGateway_TwoReplicasOpenTheCheckoutOnce(t *testing.T) {
+	e := setupGateway(t)
+	p := e.requestPayment()
+	e.gw.delay = 200 * time.Millisecond // long enough for the replicas to overlap if nothing keeps them apart
+	other := e.newReplica()
+	lockA := postgres.NewAdvisoryLock(e.db, 4242)
+	lockB := postgres.NewAdvisoryLock(e.db, 4242)
+	e.svc.WithGateway(billing.GatewayConfig{Gateway: e.gw, CheckoutTTL: 48 * time.Hour, WorkLock: lockA})
+	other.WithGateway(billing.GatewayConfig{Gateway: e.gw, CheckoutTTL: 48 * time.Hour, WorkLock: lockB})
+
+	var wg sync.WaitGroup
+	for _, svc := range []*billing.Service{e.svc, other, e.svc, other, e.svc, other} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc.ProcessGatewayWork(e.ctx)
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, 1, e.gw.created, "the replicas take turns: the checkout of %s is opened once", p.ID)
+}
+
+func TestGateway_AdvisoryLockExcludesAnotherSessionUntilReleased(t *testing.T) {
+	e := setupGateway(t)
+	first := postgres.NewAdvisoryLock(e.db, 4243)
+	second := postgres.NewAdvisoryLock(e.db, 4243)
+
+	release, ok, err := first.TryLock(e.ctx)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	_, ok, err = second.TryLock(e.ctx)
+	require.NoError(t, err)
+	assert.False(t, ok, "held by the first session")
+
+	release()
+	release2, ok, err := second.TryLock(e.ctx)
+	require.NoError(t, err)
+	assert.True(t, ok, "free again after the release")
+	release2()
 }
