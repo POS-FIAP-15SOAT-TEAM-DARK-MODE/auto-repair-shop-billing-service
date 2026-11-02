@@ -236,6 +236,23 @@ func TestWebhook_UnreadableBody(t *testing.T) {
 	assert.ErrorIs(t, err, payment.ErrInvalidNotification)
 }
 
+func TestWebhook_ABodyOverTheLimitIsRefusedNotCutShort(t *testing.T) {
+	logs := captureLogs(t)
+	c, g := newWebhookController(t, &fakeVerifier{})
+
+	over := `{"data":{"id":"1"},"pad":"` + strings.Repeat("x", webhookMaxBody) + `"}`
+	_, err := c.Webhook(context.Background(), webhookRequest("data.id=1&type=payment", over))
+	assert.ErrorIs(t, err, payment.ErrInvalidNotification)
+	assert.Equal(t, "body_too_large", eventsOf(logs)["webhook.rejected"].ContextMap()["reason"])
+
+	// exactly at the limit is still read
+	atLimit := `{"pad":"` + strings.Repeat("x", webhookMaxBody-len(`{"pad":""}`)) + `"}`
+	require.Len(t, atLimit, webhookMaxBody)
+	_, err = c.Webhook(context.Background(), webhookRequest("data.id=1&type=merchant_order", atLimit))
+	assert.NoError(t, err, "a body exactly at the limit is accepted")
+	g.assertDB()
+}
+
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("read boom") }

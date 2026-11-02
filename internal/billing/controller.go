@@ -172,8 +172,13 @@ type webhookResponse struct {
 // which is checked before anything else is done. The body is never trusted for the payment data,
 // only for the id; the payment is read from the gateway. A non-2xx answer makes the gateway retry.
 func (c *Controller) Webhook(ctx context.Context, req *http.Request) (webhookResponse, error) {
-	body, err := io.ReadAll(io.LimitReader(req.Body, webhookMaxBody))
+	body, err := io.ReadAll(io.LimitReader(req.Body, webhookMaxBody+1))
 	if err != nil {
+		return webhookResponse{}, payment.ErrInvalidNotification
+	}
+	if len(body) > webhookMaxBody {
+		// A real notification is a few hundred bytes. Cutting a bigger body short would hide it: refuse it.
+		logger.Of(ctx).Warn("payment webhook rejected: body too large", zap.String("event", "webhook.rejected"), zap.String("reason", "body_too_large"), zap.Int("limit_bytes", webhookMaxBody))
 		return webhookResponse{}, payment.ErrInvalidNotification
 	}
 	var n webhookNotification

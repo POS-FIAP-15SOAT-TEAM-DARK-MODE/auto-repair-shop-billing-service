@@ -79,6 +79,20 @@ not hold the database transaction of a command. The saga, its message contracts 
   checkout is stored, a retried creation first reuses the open preference, and closing a payment that has no
   stored checkout asks the gateway for it (`FindCheckout`) and expires what it finds. The creation step does
   not stamp `last_checked_at`, so a payment whose creation keeps failing is still reconciled.
+- **Money as a float, in one place.** Money is `decimal` everywhere (rule: never `float`). The only exception is
+  the edge with the SDK, which models `unit_price` and `transaction_amount` as `float64`: the amount is rounded
+  to two places and converted when the checkout is created (`mercadopago.CreateCheckout`), and converted back
+  with `NewFromFloat(...).Round(2)` when a payment is read. A test checks that amounts from 0.01 to
+  99,999,999.99 (the `NUMERIC(10,2)` range) survive the round trip without losing a cent.
+- **`charged_back` is `REFUNDED`.** It publishes `PaymentRefunded`, which the orchestrator accepts and only logs
+  (`saga.reply_logged`), so a chargeback never moves a service order. The money is gone either way; the saga is
+  not asked to react.
+- **`/metrics` is not exposed.** The gateway routes only `/v1/*` and the lambda login (`config/routes.yaml`),
+  and blocks `/internal/*`; `/metrics`, `/ping` and `/swagger` of the services stay inside the cluster.
+- A webhook body over 64 KB is refused (400 and a `webhook.rejected` log), not cut short: a notification is a
+  few hundred bytes, and the payment is always read from Mercado Pago anyway.
+- The worker queries are served by `idx_payment_gateway_work (status, last_checked_at NULLS FIRST, created_at,
+  id)` (migration `000005`): an index-only scan, 0.08 ms with 40,000 payments.
 - A refund reads the payment at the gateway before it asks for one. The sandbox answers `401` to every refund
   request, which is classified as transient and retried; reading first lets a refund made from the seller's
   panel settle the payment (or close the unsettled record) without a webhook, and makes the stuck-refund warning

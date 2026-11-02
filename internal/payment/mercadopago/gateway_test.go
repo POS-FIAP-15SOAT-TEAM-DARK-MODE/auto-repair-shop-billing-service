@@ -289,3 +289,17 @@ func TestFindCheckout_ReturnsTheOpenPreferenceOfThePayment(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, found)
 }
+
+func TestCreateCheckout_MoneyCrossesTheSDKAsAFloatWithoutLosingACent(t *testing.T) {
+	for _, amount := range []string{"0.01", "0.1", "0.29", "1.15", "35.50", "221.00", "1234.56", "9999.99", "99999999.99"} {
+		want := decimal.RequireFromString(amount)
+		g, fr := newGateway(t, map[string]answer{"POST /checkout/preferences": {201, `{"id":"pref-1","init_point":"https://mp/init"}`}})
+
+		_, err := g.CreateCheckout(context.Background(), payment.CheckoutRequest{PaymentID: "pay-1", Title: "t", Amount: want, ExpiresAt: time.Now().Add(time.Hour)})
+		require.NoError(t, err, amount)
+
+		items := fr.calls[len(fr.calls)-1].body["items"].([]any)
+		sent := items[0].(map[string]any)["unit_price"].(float64)
+		assert.True(t, decimal.NewFromFloat(sent).Round(2).Equal(want), "%s went out as %v", amount, sent)
+	}
+}

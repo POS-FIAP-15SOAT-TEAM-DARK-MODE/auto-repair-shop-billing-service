@@ -58,7 +58,7 @@ func (g *Gateway) CreateCheckout(ctx context.Context, req payment.CheckoutReques
 		Items: []preference.ItemRequest{{
 			Title:      req.Title,
 			Quantity:   1,
-			UnitPrice:  req.Amount.InexactFloat64(),
+			UnitPrice:  req.Amount.Round(2).InexactFloat64(), // the one place money becomes a float: the SDK models it so (see ADR 0003)
 			CurrencyID: "BRL",
 		}},
 		ExternalReference: req.PaymentID,
