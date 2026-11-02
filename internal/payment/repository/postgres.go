@@ -32,6 +32,12 @@ const (
 		min(refund_requested_at) FILTER (WHERE status = 'APPROVED' AND refund_requested_at IS NOT NULL)
 		FROM payment WHERE provider = 'mercadopago' AND status IN ('PENDING', 'APPROVED')`
 	markCheckedQuery = `UPDATE payment SET last_checked_at = $2 WHERE id = $1`
+
+	insertUnsettledQuery       = `INSERT INTO unsettled_payment (gateway_payment_id, payment_id, reason, amount) VALUES ($1, $2, $3, $4) ON CONFLICT (gateway_payment_id) DO NOTHING`
+	listUnsettledQuery         = `SELECT gateway_payment_id, payment_id, reason, amount, created_at FROM unsettled_payment WHERE status = 'PENDING' ORDER BY last_checked_at NULLS FIRST, created_at LIMIT $1`
+	markUnsettledCheckedQuery  = `UPDATE unsettled_payment SET last_checked_at = $2 WHERE gateway_payment_id = $1`
+	markUnsettledRefundedQuery = `UPDATE unsettled_payment SET status = 'REFUNDED', refunded_at = $2 WHERE gateway_payment_id = $1`
+	unsettledStatsQuery        = `SELECT count(*), min(created_at) FROM unsettled_payment WHERE status = 'PENDING'`
 )
 
 // Postgres implements payment.Repository on the billing database.
@@ -161,5 +167,57 @@ func (r *Postgres) PendingStats(ctx context.Context, ex db.Executor) (payment.Pe
 	if oldestRefund.Valid {
 		out.OldestRefundRequest = &oldestRefund.Time
 	}
+	var oldestUnsettled sql.NullTime
+	if err := ex.QueryRowContext(ctx, unsettledStatsQuery).Scan(&out.UnsettledPending, &oldestUnsettled); err != nil {
+		return payment.PendingStats{}, err
+	}
+	if oldestUnsettled.Valid {
+		out.OldestUnsettled = &oldestUnsettled.Time
+	}
 	return out, nil
+}
+
+// RecordUnsettled stores an approved gateway payment that has to be refunded; false means it was already recorded.
+func (r *Postgres) RecordUnsettled(ctx context.Context, ex db.Executor, u *payment.Unsettled) (bool, error) {
+	res, err := ex.ExecContext(ctx, insertUnsettledQuery, u.GatewayPaymentID, u.PaymentID, string(u.Reason), u.Amount.StringFixed(2))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ListUnsettled returns the unsettled payments still to be refunded, the ones looked at least recently first.
+func (r *Postgres) ListUnsettled(ctx context.Context, ex db.Executor, limit int) ([]*payment.Unsettled, error) {
+	rows, err := ex.QueryContext(ctx, listUnsettledQuery, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []*payment.Unsettled
+	for rows.Next() {
+		var u payment.Unsettled
+		var amount string
+		if err := rows.Scan(&u.GatewayPaymentID, &u.PaymentID, &u.Reason, &amount, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		if u.Amount, err = decimal.NewFromString(amount); err != nil {
+			return nil, err
+		}
+		out = append(out, &u)
+	}
+	return out, rows.Err()
+}
+
+// MarkUnsettledChecked stores when the worker last looked at the unsettled payment.
+func (r *Postgres) MarkUnsettledChecked(ctx context.Context, ex db.Executor, gatewayPaymentID string, at time.Time) error {
+	_, err := ex.ExecContext(ctx, markUnsettledCheckedQuery, gatewayPaymentID, at)
+	return err
+}
+
+// MarkUnsettledRefunded closes the record of an unsettled payment.
+func (r *Postgres) MarkUnsettledRefunded(ctx context.Context, ex db.Executor, gatewayPaymentID string, at time.Time) error {
+	_, err := ex.ExecContext(ctx, markUnsettledRefundedQuery, gatewayPaymentID, at)
+	return err
 }

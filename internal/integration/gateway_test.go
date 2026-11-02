@@ -448,3 +448,37 @@ func TestGateway_RefundBacklogOnPostgres(t *testing.T) {
 	require.NotNil(t, got.OldestRefundRequest)
 	assert.WithinDuration(t, time.Now().Add(-20*time.Minute), *got.OldestRefundRequest, time.Minute)
 }
+
+func TestGateway_UnsettledApprovalIsRecordedOnceAndRefundedOnPostgres(t *testing.T) {
+	e := setupGateway(t)
+	p := e.requestPayment()
+	_, err := e.db.ExecContext(e.ctx, "UPDATE payment SET status = 'CANCELLED', external_id = 'pref-1', checkout_closed_at = now() WHERE id = $1", p.ID)
+	require.NoError(t, err)
+
+	// the customer pays the link of a payment that was cancelled; the notification arrives three times
+	approved := gwPayment(p.ID, "1001", "approved")
+	for range 3 {
+		res, err := e.svc.ApplyGatewayPayment(e.ctx, approved)
+		require.NoError(t, err)
+		assert.Equal(t, billing.ResultRefundScheduled, res)
+	}
+	var rows int
+	require.NoError(t, e.db.QueryRowContext(e.ctx, "SELECT count(*) FROM unsettled_payment WHERE gateway_payment_id = '1001' AND status = 'PENDING' AND reason = 'LATE_APPROVAL'").Scan(&rows))
+	assert.Equal(t, 1, rows, "recorded once, however many notifications arrive")
+	assert.Empty(t, e.outboxTypes(), "no event for the saga: it has moved on")
+
+	e.gw.put(approved)
+	e.pass() // asks for the refund, which the in-memory gateway applies at once
+	e.pass()
+
+	var status string
+	var refundedAt sql.NullTime
+	require.NoError(t, e.db.QueryRowContext(e.ctx, "SELECT status, refunded_at FROM unsettled_payment WHERE gateway_payment_id = '1001'").Scan(&status, &refundedAt))
+	assert.Equal(t, "REFUNDED", status)
+	assert.True(t, refundedAt.Valid)
+	assert.Equal(t, payment.StatusCancelled, e.reload().Status, "the payment itself is untouched")
+
+	stats, err := paymentRepo.NewPostgres().PendingStats(e.ctx, e.db)
+	require.NoError(t, err)
+	assert.Zero(t, stats.UnsettledPending)
+}

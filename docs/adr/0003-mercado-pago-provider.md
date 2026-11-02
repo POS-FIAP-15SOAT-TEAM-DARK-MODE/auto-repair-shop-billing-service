@@ -29,8 +29,9 @@ not hold the database transaction of a command. The saga, its message contracts 
 5. **One place changes a status.** `ApplyGatewayPayment` is used by the webhook, the reconciliation and the
    refund confirmation: it locks the row (`FOR UPDATE`), validates the transition and enqueues the saga event in
    the same transaction. It settles against `transaction_amount` (installment interest is not part of the
-   price), and logs, without applying, a late approval on a closed payment, a second approved payment and an
-   approval with another amount.
+   price). It does not apply a late approval on a closed payment or a second approved payment: they are
+   recorded in `unsettled_payment` (migration `000004`) in the same transaction and refunded by the worker (the
+   saga is not told, it has moved on). An approval with another amount is only logged: it needs a person.
 6. **Webhook.** `POST /v1/webhooks/mercadopago` is public and registered only in this mode. The signature is
    verified first (SDK helper, 5 min tolerance); the body is never trusted for payment data, the payment is
    read from Mercado Pago by `data.id`; other types are acknowledged; failures answer 5xx so it retries.
@@ -58,8 +59,9 @@ not hold the database transaction of a command. The saga, its message contracts 
 - Row locks make the webhook, the worker and the manual endpoints safe against each other; the same locking
   is now used by `RefundPayment` and by `confirm`/`reject`.
 - Known gaps, listed in the RFC: a refund through the Mercado Pago API returned `401` ("Unauthorized use of live
-  credentials") in the sandbox, so a refund can stay requested and is retried with a backoff; a late or extra
-  approval is only logged and needs a manual refund; a refund or chargeback made outside the saga on an
+  credentials") in the sandbox, so a refund can stay requested and is retried with a backoff; the refund
+  of a late or extra approval depends on the same API, so until the 401 is understood it stays recorded and
+  retried (alert on `refunds_pending_oldest_age_seconds`); a refund or chargeback made outside the saga on an
   `APPROVED` payment is seen only through the webhook, because the reconciliation covers `PENDING` payments; the real webhook is verified once the service runs in
   the AWS Lab.
 - The worker stamps `payment.last_checked_at` (migration `000003`) and serves the least recently checked first,

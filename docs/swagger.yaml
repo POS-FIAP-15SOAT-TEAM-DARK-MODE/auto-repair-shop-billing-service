@@ -154,7 +154,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  result: {type: string, enum: [applied, duplicate, ignored, unknown]}
+                  result: {type: string, enum: [applied, duplicate, ignored, unknown, refund_scheduled]}
         '400': {$ref: '#/components/responses/Error'}
         '401': {$ref: '#/components/responses/Error'}
         '500': {$ref: '#/components/responses/Error'}

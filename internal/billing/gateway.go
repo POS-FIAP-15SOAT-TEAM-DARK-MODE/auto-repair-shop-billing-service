@@ -92,6 +92,9 @@ const (
 	ResultDuplicate ApplyResult = "duplicate"
 	ResultIgnored   ApplyResult = "ignored"
 	ResultUnknown   ApplyResult = "unknown"
+	// ResultRefundScheduled: the gateway payment was approved but cannot settle the payment (a late or an
+	// extra approval), so it was recorded to be refunded.
+	ResultRefundScheduled ApplyResult = "refund_scheduled"
 )
 
 // ApplyGatewayPayment is the single place where a gateway payment changes the status of a payment.
@@ -124,19 +127,33 @@ func (s *Service) ApplyGatewayPayment(ctx context.Context, gp payment.GatewayPay
 	return result, err
 }
 
+// scheduleRefund records an approved gateway payment that cannot settle the payment, in the same
+// transaction, so the worker refunds it. The money is the customer's: nothing is owed to the saga, which
+// has already moved on, so no event is published. Seen again (a repeated notification), it is not
+// recorded or counted twice.
+func (s *Service) scheduleRefund(ctx context.Context, tx *sql.Tx, pay *payment.Payment, gp payment.GatewayPayment, reason payment.UnsettledReason, label, msg string, fields []zap.Field) (ApplyResult, error) {
+	isNew, err := s.payments.RecordUnsettled(ctx, tx, &payment.Unsettled{GatewayPaymentID: gp.ID, PaymentID: pay.ID, Reason: reason, Amount: gp.Amount})
+	if err != nil {
+		return ResultIgnored, err
+	}
+	if isNew {
+		metrics.PaymentsUnsettled.WithLabelValues(label).Inc()
+		logger.Of(ctx).Warn(msg, append(fields, zap.String("event", "payment.unsettled"), zap.String("reason", label))...)
+	}
+	return ResultRefundScheduled, nil
+}
+
 func (s *Service) applyLocked(ctx context.Context, tx *sql.Tx, pay *payment.Payment, gp payment.GatewayPayment, target payment.Status) (ApplyResult, error) {
 	base := []zap.Field{zap.String("payment_id", pay.ID), zap.String("saga_id", pay.SagaID), zap.String("service_order_id", pay.ServiceOrderID), zap.String("gateway_payment_id", gp.ID)}
 	fields := func(extra ...zap.Field) []zap.Field { return append(slices.Clone(base), extra...) }
 
 	switch {
 	case target == payment.StatusApproved && pay.Status == payment.StatusApproved && pay.GatewayPaymentID != "" && pay.GatewayPaymentID != gp.ID:
-		metrics.PaymentsUnsettled.WithLabelValues("extra_approval").Inc()
-		logger.Of(ctx).Error(errors.New("extra approved gateway payment: needs a manual refund"), fields(zap.String("event", "payment.unsettled"), zap.String("reason", "extra_approval"), zap.String("settled_by", pay.GatewayPaymentID))...)
-		return ResultIgnored, nil
+		return s.scheduleRefund(ctx, tx, pay, gp, payment.UnsettledExtraApproval, "extra_approval",
+			"extra approved gateway payment: refund scheduled", fields(zap.String("settled_by", pay.GatewayPaymentID)))
 	case target == payment.StatusApproved && (pay.Status == payment.StatusCancelled || pay.Status == payment.StatusRejected):
-		metrics.PaymentsUnsettled.WithLabelValues("late_approval").Inc()
-		logger.Of(ctx).Error(errors.New("late approval on a closed payment: needs a manual refund"), fields(zap.String("event", "payment.unsettled"), zap.String("reason", "late_approval"), zap.String("status", string(pay.Status)))...)
-		return ResultIgnored, nil
+		return s.scheduleRefund(ctx, tx, pay, gp, payment.UnsettledLateApproval, "late_approval",
+			"late approval on a closed payment: refund scheduled", fields(zap.String("status", string(pay.Status))))
 	case target == payment.StatusApproved && !gp.Amount.Equal(pay.Amount):
 		metrics.PaymentsUnsettled.WithLabelValues("amount_mismatch").Inc()
 		logger.Of(ctx).Error(errors.New("approved gateway payment with another amount, not settled"), fields(zap.String("event", "payment.unsettled"), zap.String("reason", "amount_mismatch"), zap.String("expected", formatMoney(pay.Amount)), zap.String("got", formatMoney(gp.Amount)))...)
@@ -267,6 +284,7 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 			s.retry.clear(key)
 		}
 	}
+	s.refundUnsettled(ctx, now)
 	s.publishPendingStats(ctx, now)
 }
 
@@ -284,10 +302,13 @@ func (s *Service) publishPendingStats(ctx context.Context, now time.Time) {
 	}
 	metrics.PaymentsPendingOldestAge.Set(age)
 
-	metrics.RefundsPending.Set(float64(stats.RefundsPending))
+	// the refunds the saga asked for and the unsettled payments to give back are both money waiting to leave
+	metrics.RefundsPending.Set(float64(stats.RefundsPending + stats.UnsettledPending))
 	refundAge := 0.0
-	if stats.OldestRefundRequest != nil {
-		refundAge = max(now.Sub(*stats.OldestRefundRequest).Seconds(), 0)
+	for _, since := range []*time.Time{stats.OldestRefundRequest, stats.OldestUnsettled} {
+		if since != nil {
+			refundAge = max(refundAge, now.Sub(*since).Seconds())
+		}
 	}
 	metrics.RefundsPendingOldestAge.Set(refundAge)
 }
@@ -460,13 +481,89 @@ func (s *Service) warnIfRefundIsStuck(ctx context.Context, p *payment.Payment) {
 	if p.RefundRequestedAt == nil {
 		return
 	}
-	age := s.now().Sub(*p.RefundRequestedAt)
+	s.warnRefundStuck(ctx, *p.RefundRequestedAt, zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID),
+		zap.String("service_order_id", p.ServiceOrderID), zap.String("gateway_payment_id", p.GatewayPaymentID))
+}
+
+func (s *Service) warnRefundStuck(ctx context.Context, since time.Time, fields ...zap.Field) {
+	age := s.now().Sub(since)
 	if age < refundStuckAfter {
 		return
 	}
-	logger.Of(ctx).Warn("refund not confirmed by the gateway", zap.String("event", "payment.refund_stuck"),
-		zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID), zap.String("service_order_id", p.ServiceOrderID),
-		zap.String("gateway_payment_id", p.GatewayPaymentID), zap.Float64("age_seconds", age.Seconds()))
+	logger.Of(ctx).Warn("refund not confirmed by the gateway", append(fields, zap.String("event", "payment.refund_stuck"), zap.Float64("age_seconds", age.Seconds()))...)
+}
+
+// refundUnsettled gives back the money of the approved gateway payments that could not settle a payment
+// (see scheduleRefund). It is a step of the pass like the others: it calls the gateway outside any
+// transaction, backs off on failures and never blocks the rest of the pass.
+func (s *Service) refundUnsettled(ctx context.Context, now time.Time) {
+	list, err := s.payments.ListUnsettled(ctx, s.db, workBatch)
+	if err != nil {
+		logger.Of(ctx).Error(fmt.Errorf("list unsettled: %w", err), zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", "REFUND_UNSETTLED"))
+		return
+	}
+	for _, u := range list {
+		key := "UNSETTLED:" + u.GatewayPaymentID
+		ready := s.retry.ready(key, now)
+		var err error
+		if ready {
+			err = s.refundOneUnsettled(ctx, u)
+		}
+		if markErr := s.payments.MarkUnsettledChecked(ctx, s.db, u.GatewayPaymentID, now); markErr != nil {
+			logger.Of(ctx).Error(markErr, zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", "REFUND_UNSETTLED"), zap.String("gateway_payment_id", u.GatewayPaymentID))
+		}
+		switch {
+		case !ready:
+		case err == nil:
+			s.retry.clear(key)
+		case errors.Is(err, errNotYet):
+			s.retry.fail(key, now)
+			logger.Of(ctx).Debug("waiting for the gateway", zap.String("event", "gateway.worker_waiting"), zap.String("component", "gateway-worker"), zap.String("step", "REFUND_UNSETTLED"), zap.String("gateway_payment_id", u.GatewayPaymentID))
+		default:
+			s.retry.fail(key, now)
+			kind := "permanent"
+			if payment.IsTransient(err) {
+				kind = "transient"
+			}
+			metrics.GatewayWorkerErrors.WithLabelValues("REFUND_UNSETTLED", kind).Inc()
+			logger.Of(ctx).Error(err, zap.String("event", "gateway.worker_step_failed"), zap.String("component", "gateway-worker"), zap.String("step", "REFUND_UNSETTLED"),
+				zap.String("payment_id", u.PaymentID), zap.String("gateway_payment_id", u.GatewayPaymentID), zap.Bool("transient", payment.IsTransient(err)))
+		}
+	}
+}
+
+// refundOneUnsettled asks the gateway to refund the payment and closes the record only once the gateway
+// says the money is no longer held. A permanent refusal is not final: the refund may already exist.
+func (s *Service) refundOneUnsettled(ctx context.Context, u *payment.Unsettled) error {
+	var refundErr error
+	if !s.retry.refundSubmitted(u.GatewayPaymentID) {
+		if err := s.gateway.Refund(ctx, u.GatewayPaymentID); err != nil {
+			if payment.IsTransient(err) {
+				return err
+			}
+			refundErr = err
+		} else {
+			s.retry.markRefundSubmitted(u.GatewayPaymentID)
+		}
+	}
+	gp, err := s.gateway.GetPayment(ctx, u.GatewayPaymentID)
+	if err != nil {
+		return err
+	}
+	if st, ok := payment.MapGatewayStatus(gp.Status); ok && (st == payment.StatusRefunded || st == payment.StatusRejected || st == payment.StatusCancelled) {
+		if err := s.payments.MarkUnsettledRefunded(ctx, s.db, u.GatewayPaymentID, s.now()); err != nil {
+			return err
+		}
+		s.retry.forgetRefund(u.GatewayPaymentID)
+		logger.Of(ctx).Info("unsettled payment refunded", zap.String("event", "payment.unsettled_refunded"),
+			zap.String("payment_id", u.PaymentID), zap.String("gateway_payment_id", u.GatewayPaymentID), zap.String("reason", string(u.Reason)))
+		return nil
+	}
+	s.warnRefundStuck(ctx, u.CreatedAt, zap.String("payment_id", u.PaymentID), zap.String("gateway_payment_id", u.GatewayPaymentID), zap.String("reason", string(u.Reason)))
+	if refundErr != nil {
+		return refundErr
+	}
+	return errNotYet
 }
 
 // closeCheckout makes the checkout of a finished payment unpayable, and cancels a gateway payment

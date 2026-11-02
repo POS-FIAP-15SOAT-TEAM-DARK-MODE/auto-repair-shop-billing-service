@@ -117,6 +117,36 @@ type Repository interface {
 	PendingStats(ctx context.Context, ex db.Executor) (PendingStats, error)
 	// MarkChecked records that the gateway worker looked at the payment at the given time.
 	MarkChecked(ctx context.Context, ex db.Executor, id string, at time.Time) error
+
+	// RecordUnsettled stores an approved gateway payment that must be refunded. It reports whether the
+	// row is new: the same gateway payment is never recorded twice.
+	RecordUnsettled(ctx context.Context, ex db.Executor, u *Unsettled) (bool, error)
+	// ListUnsettled returns up to limit unsettled payments still to be refunded, the ones looked at least
+	// recently first.
+	ListUnsettled(ctx context.Context, ex db.Executor, limit int) ([]*Unsettled, error)
+	// MarkUnsettledChecked records that the worker looked at the unsettled payment at the given time.
+	MarkUnsettledChecked(ctx context.Context, ex db.Executor, gatewayPaymentID string, at time.Time) error
+	// MarkUnsettledRefunded closes the record once the gateway no longer holds the money.
+	MarkUnsettledRefunded(ctx context.Context, ex db.Executor, gatewayPaymentID string, at time.Time) error
+}
+
+// UnsettledReason says why an approved gateway payment was not settled.
+type UnsettledReason string
+
+const (
+	// UnsettledLateApproval: the customer paid after the payment was cancelled or rejected.
+	UnsettledLateApproval UnsettledReason = "LATE_APPROVAL"
+	// UnsettledExtraApproval: a second approved payment for a payment already approved.
+	UnsettledExtraApproval UnsettledReason = "EXTRA_APPROVAL"
+)
+
+// Unsettled is an approved payment at the gateway that Billing did not settle and has to refund.
+type Unsettled struct {
+	GatewayPaymentID string
+	PaymentID        string
+	Reason           UnsettledReason
+	Amount           decimal.Decimal
+	CreatedAt        time.Time
 }
 
 // PendingStats is what the worker publishes about the Mercado Pago payments waiting to be settled.
@@ -127,4 +157,8 @@ type PendingStats struct {
 	// Refunds waiting for the gateway: approved payments whose refund was requested and not confirmed yet.
 	RefundsPending      int
 	OldestRefundRequest *time.Time // when the oldest of them was requested; nil when there is none
+
+	// Unsettled payments waiting to be refunded (see Unsettled).
+	UnsettledPending int
+	OldestUnsettled  *time.Time // when the oldest of them was recorded; nil when there is none
 }

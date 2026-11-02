@@ -13,6 +13,10 @@ import (
 type InMemory struct {
 	items   []*payment.Payment
 	checked map[string]time.Time
+
+	unsettled        []*payment.Unsettled
+	unsettledDone    map[string]bool
+	unsettledChecked map[string]time.Time
 }
 
 func NewInMemory() *InMemory {
@@ -139,5 +143,68 @@ func (r *InMemory) PendingStats(_ context.Context, _ db.Executor) (payment.Pendi
 			}
 		}
 	}
+	for _, u := range r.unsettled {
+		if r.unsettledDone[u.GatewayPaymentID] {
+			continue
+		}
+		out.UnsettledPending++
+		if out.OldestUnsettled == nil || u.CreatedAt.Before(*out.OldestUnsettled) {
+			created := u.CreatedAt
+			out.OldestUnsettled = &created
+		}
+	}
 	return out, nil
+}
+
+// RecordUnsettled mirrors the Postgres repository: a gateway payment is recorded once.
+func (r *InMemory) RecordUnsettled(_ context.Context, _ db.Executor, u *payment.Unsettled) (bool, error) {
+	for _, it := range r.unsettled {
+		if it.GatewayPaymentID == u.GatewayPaymentID {
+			return false, nil
+		}
+	}
+	cp := *u
+	r.unsettled = append(r.unsettled, &cp)
+	return true, nil
+}
+
+// ListUnsettled returns the ones not refunded yet, the ones looked at least recently first.
+func (r *InMemory) ListUnsettled(_ context.Context, _ db.Executor, limit int) ([]*payment.Unsettled, error) {
+	var out []*payment.Unsettled
+	for _, u := range r.unsettled {
+		if !r.unsettledDone[u.GatewayPaymentID] {
+			cp := *u
+			out = append(out, &cp)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ai, iok := r.unsettledChecked[out[i].GatewayPaymentID]
+		aj, jok := r.unsettledChecked[out[j].GatewayPaymentID]
+		if iok != jok {
+			return !iok
+		}
+		return ai.Before(aj)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// MarkUnsettledChecked remembers when the worker looked at the unsettled payment.
+func (r *InMemory) MarkUnsettledChecked(_ context.Context, _ db.Executor, gatewayPaymentID string, at time.Time) error {
+	if r.unsettledChecked == nil {
+		r.unsettledChecked = map[string]time.Time{}
+	}
+	r.unsettledChecked[gatewayPaymentID] = at
+	return nil
+}
+
+// MarkUnsettledRefunded closes the record of an unsettled payment.
+func (r *InMemory) MarkUnsettledRefunded(_ context.Context, _ db.Executor, gatewayPaymentID string, _ time.Time) error {
+	if r.unsettledDone == nil {
+		r.unsettledDone = map[string]bool{}
+	}
+	r.unsettledDone[gatewayPaymentID] = true
+	return nil
 }

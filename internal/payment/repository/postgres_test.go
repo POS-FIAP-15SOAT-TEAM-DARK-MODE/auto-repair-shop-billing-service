@@ -235,8 +235,12 @@ func TestPostgres_PendingStats(t *testing.T) {
 	cols := []string{"pending", "oldest", "refunds", "oldest_refund"}
 	oldest := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
 	requested := time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)
+	unsettledCols := []string{"unsettled", "oldest_unsettled"}
+	unsettledAt := time.Date(2026, 11, 2, 9, 45, 0, 0, time.UTC)
 	mock.ExpectQuery("FROM payment WHERE provider = 'mercadopago' AND status IN").
 		WillReturnRows(sqlmock.NewRows(cols).AddRow(3, oldest, 2, requested))
+	mock.ExpectQuery("FROM unsettled_payment WHERE status = 'PENDING'").
+		WillReturnRows(sqlmock.NewRows(unsettledCols).AddRow(4, unsettledAt))
 	got, err := NewPostgres().PendingStats(context.Background(), db)
 	require.NoError(t, err)
 	assert.Equal(t, 3, got.Count)
@@ -245,18 +249,29 @@ func TestPostgres_PendingStats(t *testing.T) {
 	assert.Equal(t, 2, got.RefundsPending)
 	require.NotNil(t, got.OldestRefundRequest)
 	assert.True(t, got.OldestRefundRequest.Equal(requested))
+	assert.Equal(t, 4, got.UnsettledPending)
+	require.NotNil(t, got.OldestUnsettled)
+	assert.True(t, got.OldestUnsettled.Equal(unsettledAt))
 
 	mock.ExpectQuery("FROM payment").WillReturnRows(sqlmock.NewRows(cols).AddRow(0, nil, 0, nil))
+	mock.ExpectQuery("FROM unsettled_payment").WillReturnRows(sqlmock.NewRows(unsettledCols).AddRow(0, nil))
 	got, err = NewPostgres().PendingStats(context.Background(), db)
 	require.NoError(t, err)
 	assert.Zero(t, got.Count)
 	assert.Nil(t, got.Oldest)
 	assert.Zero(t, got.RefundsPending)
 	assert.Nil(t, got.OldestRefundRequest)
+	assert.Zero(t, got.UnsettledPending)
+	assert.Nil(t, got.OldestUnsettled)
 
 	mock.ExpectQuery("FROM payment").WillReturnError(errors.New("boom"))
 	_, err = NewPostgres().PendingStats(context.Background(), db)
 	assert.EqualError(t, err, "boom")
+
+	mock.ExpectQuery("FROM payment").WillReturnRows(sqlmock.NewRows(cols).AddRow(0, nil, 0, nil))
+	mock.ExpectQuery("FROM unsettled_payment").WillReturnError(errors.New("unsettled boom"))
+	_, err = NewPostgres().PendingStats(context.Background(), db)
+	assert.EqualError(t, err, "unsettled boom")
 }
 
 func TestInMemory_PendingStats(t *testing.T) {
@@ -292,4 +307,103 @@ func TestInMemory_PendingStats(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, got.RefundsPending, "only approved payments with a requested refund")
 	assert.True(t, got.OldestRefundRequest.Equal(t1))
+}
+
+func TestPostgres_RecordUnsettled(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer func() { _ = db.Close() }()
+	u := &payment.Unsettled{GatewayPaymentID: "1001", PaymentID: "p1", Reason: payment.UnsettledLateApproval, Amount: decimal.RequireFromString("221")}
+
+	mock.ExpectExec("INSERT INTO unsettled_payment").WithArgs("1001", "p1", "LATE_APPROVAL", "221.00").WillReturnResult(sqlmock.NewResult(0, 1))
+	isNew, err := NewPostgres().RecordUnsettled(context.Background(), db, u)
+	require.NoError(t, err)
+	assert.True(t, isNew)
+
+	mock.ExpectExec("INSERT INTO unsettled_payment").WillReturnResult(sqlmock.NewResult(0, 0)) // ON CONFLICT DO NOTHING
+	isNew, err = NewPostgres().RecordUnsettled(context.Background(), db, u)
+	require.NoError(t, err)
+	assert.False(t, isNew, "the same gateway payment is not recorded twice")
+
+	mock.ExpectExec("INSERT INTO unsettled_payment").WillReturnError(errors.New("boom"))
+	_, err = NewPostgres().RecordUnsettled(context.Background(), db, u)
+	assert.EqualError(t, err, "boom")
+}
+
+func TestPostgres_ListUnsettled(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer func() { _ = db.Close() }()
+	cols := []string{"gateway_payment_id", "payment_id", "reason", "amount", "created_at"}
+	at := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("FROM unsettled_payment WHERE status = 'PENDING' ORDER BY last_checked_at NULLS FIRST").WithArgs(20).
+		WillReturnRows(sqlmock.NewRows(cols).AddRow("1001", "p1", "EXTRA_APPROVAL", "221.00", at))
+	got, err := NewPostgres().ListUnsettled(context.Background(), db, 20)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, payment.UnsettledExtraApproval, got[0].Reason)
+	assert.Equal(t, "221", got[0].Amount.String())
+	assert.True(t, got[0].CreatedAt.Equal(at))
+
+	mock.ExpectQuery("FROM unsettled_payment").WillReturnError(errors.New("q boom"))
+	_, err = NewPostgres().ListUnsettled(context.Background(), db, 20)
+	assert.EqualError(t, err, "q boom")
+
+	mock.ExpectQuery("FROM unsettled_payment").WillReturnRows(sqlmock.NewRows(cols).AddRow("1", "p", "EXTRA_APPROVAL", "bad", at))
+	_, err = NewPostgres().ListUnsettled(context.Background(), db, 20)
+	assert.Error(t, err)
+
+	mock.ExpectQuery("FROM unsettled_payment").WillReturnRows(sqlmock.NewRows(cols).AddRow(nil, "p", "EXTRA_APPROVAL", "1", at))
+	_, err = NewPostgres().ListUnsettled(context.Background(), db, 20)
+	assert.Error(t, err, "a row that cannot be scanned")
+}
+
+func TestPostgres_MarkUnsettledCheckedAndRefunded(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer func() { _ = db.Close() }()
+	at := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	mock.ExpectExec("UPDATE unsettled_payment SET last_checked_at").WithArgs("1001", at).WillReturnResult(sqlmock.NewResult(0, 1))
+	require.NoError(t, NewPostgres().MarkUnsettledChecked(context.Background(), db, "1001", at))
+	mock.ExpectExec("UPDATE unsettled_payment SET status = 'REFUNDED'").WithArgs("1001", at).WillReturnResult(sqlmock.NewResult(0, 1))
+	require.NoError(t, NewPostgres().MarkUnsettledRefunded(context.Background(), db, "1001", at))
+	mock.ExpectExec("UPDATE unsettled_payment").WillReturnError(errors.New("boom"))
+	assert.EqualError(t, NewPostgres().MarkUnsettledRefunded(context.Background(), db, "1001", at), "boom")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestInMemory_UnsettledPaymentsAreRecordedOnceListedFairlyAndClosed(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemory()
+	at := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	mk := func(id string, created time.Time) *payment.Unsettled {
+		return &payment.Unsettled{GatewayPaymentID: id, PaymentID: "p", Reason: payment.UnsettledLateApproval, Amount: decimal.NewFromInt(1), CreatedAt: created}
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		isNew, err := repo.RecordUnsettled(ctx, nil, mk(id, at))
+		require.NoError(t, err)
+		assert.True(t, isNew)
+	}
+	isNew, _ := repo.RecordUnsettled(ctx, nil, mk("a", at))
+	assert.False(t, isNew, "recorded once")
+
+	ids := func(limit int) []string {
+		list, err := repo.ListUnsettled(ctx, nil, limit)
+		require.NoError(t, err)
+		var out []string
+		for _, u := range list {
+			out = append(out, u.GatewayPaymentID)
+		}
+		return out
+	}
+	assert.Equal(t, []string{"a", "b"}, ids(2))
+
+	require.NoError(t, repo.MarkUnsettledChecked(ctx, nil, "a", at.Add(time.Minute)))
+	assert.Equal(t, []string{"b", "c", "a"}, ids(0), "the one looked at goes to the back")
+
+	require.NoError(t, repo.MarkUnsettledRefunded(ctx, nil, "b", at))
+	assert.Equal(t, []string{"c", "a"}, ids(0), "a refunded one is no longer listed")
+
+	stats, err := repo.PendingStats(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, stats.UnsettledPending)
+	assert.True(t, stats.OldestUnsettled.Equal(at))
 }

@@ -317,13 +317,20 @@ func TestGateway_ApprovedAmountIgnoresInstallmentInterest(t *testing.T) {
 	g.assertDB()
 }
 
-func TestGateway_LateAndExtraApprovalsAreFlaggedNotApplied(t *testing.T) {
+func TestGateway_LateAndExtraApprovalsAreNotAppliedButScheduledForRefund(t *testing.T) {
 	g := newGatewayHarness(t)
 	g.seedGatewayPayment(func(p *payment.Payment) { withCheckout(p); p.Status = payment.StatusCancelled })
-	g.tx(0)
+	g.tx(0) // no saga event: the saga has moved on
 	res, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "approved", "221"))
 	require.NoError(t, err)
-	assert.Equal(t, ResultIgnored, res, "late approval on a cancelled payment")
+	assert.Equal(t, ResultRefundScheduled, res, "late approval on a cancelled payment")
+	assert.Equal(t, payment.StatusCancelled, g.reload().Status, "the payment stays closed")
+	late, _ := g.payments.ListUnsettled(context.Background(), nil, 10)
+	require.Len(t, late, 1)
+	assert.Equal(t, payment.UnsettledLateApproval, late[0].Reason)
+	assert.Equal(t, "1001", late[0].GatewayPaymentID)
+	assert.Equal(t, "pay-1", late[0].PaymentID)
+	assert.True(t, late[0].Amount.Equal(decimal.NewFromInt(221)))
 
 	g2 := newGatewayHarness(t)
 	g2.seedGatewayPayment(func(p *payment.Payment) {
@@ -334,8 +341,28 @@ func TestGateway_LateAndExtraApprovalsAreFlaggedNotApplied(t *testing.T) {
 	g2.tx(0)
 	res, err = g2.svc.ApplyGatewayPayment(context.Background(), gp("1002", "approved", "221"))
 	require.NoError(t, err)
-	assert.Equal(t, ResultIgnored, res, "a second approved payment")
+	assert.Equal(t, ResultRefundScheduled, res, "a second approved payment")
 	assert.Equal(t, "1001", g2.reload().GatewayPaymentID, "the first approved payment keeps settling the order")
+	extra, _ := g2.payments.ListUnsettled(context.Background(), nil, 10)
+	require.Len(t, extra, 1)
+	assert.Equal(t, payment.UnsettledExtraApproval, extra[0].Reason)
+	assert.Equal(t, "1002", extra[0].GatewayPaymentID)
+}
+
+func TestGateway_ARepeatedNotificationOfAnUnsettledPaymentIsRecordedAndCountedOnce(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) { withCheckout(p); p.Status = payment.StatusRejected })
+	before := unsettled("late_approval")
+	for range 3 {
+		g.tx(0)
+		res, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "approved", "221"))
+		require.NoError(t, err)
+		assert.Equal(t, ResultRefundScheduled, res)
+	}
+	list, _ := g.payments.ListUnsettled(context.Background(), nil, 10)
+	assert.Len(t, list, 1)
+	assert.Equal(t, before+1, unsettled("late_approval"))
+	g.assertDB()
 }
 
 func TestGateway_ApplyRefundedAfterApprovalPublishesPaymentRefunded(t *testing.T) {
@@ -1256,5 +1283,124 @@ func TestGateway_ClosingRetriesWhenTheGatewayCannotBeAskedForTheCheckout(t *test
 	g.tx(0)
 	g.svc.ProcessGatewayWork(context.Background())
 	assert.NotNil(t, g.reload().CheckoutClosedAt)
+	g.assertDB()
+}
+
+// ---- refund of the unsettled payments ----
+
+func scheduleUnsettled(g *gatewayHarness, gatewayID string, reason payment.UnsettledReason, at time.Time) {
+	g.seedGatewayPayment(func(p *payment.Payment) { withCheckout(p); p.Status = payment.StatusCancelled })
+	_, err := g.payments.RecordUnsettled(context.Background(), nil, &payment.Unsettled{
+		GatewayPaymentID: gatewayID, PaymentID: "pay-1", Reason: reason, Amount: decimal.NewFromInt(221), CreatedAt: at})
+	require.NoError(g.t, err)
+}
+
+func pendingUnsettled(g *gatewayHarness) int {
+	list, err := g.payments.ListUnsettled(context.Background(), nil, 10)
+	require.NoError(g.t, err)
+	return len(list)
+}
+
+func TestGateway_AnUnsettledPaymentIsRefundedAndClosedOnceTheGatewayConfirms(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	scheduleUnsettled(g, "1001", payment.UnsettledLateApproval, t0)
+	g.tx(0)                                           // closing the checkout of the cancelled payment
+	g.gw.byID["1001"] = gp("1001", "approved", "221") // not refunded yet
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, []string{"1001"}, g.gw.refunded, "the refund is asked for")
+	assert.Equal(t, 1, pendingUnsettled(g), "still waiting for the gateway to confirm")
+
+	g.now = g.now.Add(time.Minute)
+	g.gw.byID["1001"] = gp("1001", "refunded", "221") // Mercado Pago confirmed
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, []string{"1001"}, g.gw.refunded, "the refund is not submitted twice")
+	assert.Zero(t, pendingUnsettled(g), "closed")
+	done := eventsOf(logs)["payment.unsettled_refunded"]
+	assert.Equal(t, "LATE_APPROVAL", done.ContextMap()["reason"])
+	g.assertDB()
+}
+
+func TestGateway_AnUnsettledPaymentAlreadyRefundedAtTheGatewayIsClosedWithoutFailing(t *testing.T) {
+	g := newGatewayHarness(t)
+	scheduleUnsettled(g, "1001", payment.UnsettledExtraApproval, t0)
+	g.tx(0)
+	g.gw.refundErr = permanent                        // the refund already exists (made from the seller's panel)
+	g.gw.byID["1001"] = gp("1001", "refunded", "221") // and the payment says so
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Zero(t, pendingUnsettled(g))
+	g.assertDB()
+}
+
+func TestGateway_AnUnsettledRefundThatStaysUnconfirmedIsRetriedAndWarnedAbout(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	scheduleUnsettled(g, "1001", payment.UnsettledLateApproval, t0)
+	g.tx(0)
+	g.gw.refundErr = permanent
+	g.gw.byID["1001"] = gp("1001", "approved", "221") // the refund keeps being refused (the sandbox 401)
+	g.now = t0.Add(time.Hour)
+	before := testutil.ToFloat64(metrics.GatewayWorkerErrors.WithLabelValues("REFUND_UNSETTLED", "permanent"))
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, 1, pendingUnsettled(g), "never closed while the gateway holds the money")
+	assert.Equal(t, before+1, testutil.ToFloat64(metrics.GatewayWorkerErrors.WithLabelValues("REFUND_UNSETTLED", "permanent")))
+	stuck := eventsOf(logs)["payment.refund_stuck"]
+	assert.Equal(t, "1001", stuck.ContextMap()["gateway_payment_id"])
+	assert.Equal(t, "LATE_APPROVAL", stuck.ContextMap()["reason"])
+
+	calls := len(g.gw.refunded)
+	g.svc.ProcessGatewayWork(context.Background()) // backing off
+	assert.Len(t, g.gw.refunded, calls)
+}
+
+func TestGateway_AnUnsettledRefundFailingTransientlyIsRetried(t *testing.T) {
+	g := newGatewayHarness(t)
+	scheduleUnsettled(g, "1001", payment.UnsettledLateApproval, t0)
+	g.tx(0)
+	g.gw.refundErr = transient
+
+	g.svc.ProcessGatewayWork(context.Background())
+	assert.Equal(t, 1, pendingUnsettled(g))
+
+	g.now = g.now.Add(time.Minute)
+	g.gw.refundErr = nil
+	g.gw.byID["1001"] = gp("1001", "refunded", "221")
+	g.svc.ProcessGatewayWork(context.Background())
+	assert.Zero(t, pendingUnsettled(g))
+	g.assertDB()
+}
+
+func TestGateway_MetricsCountTheUnsettledPaymentsAmongTheRefundBacklog(t *testing.T) {
+	g := newGatewayHarness(t)
+	scheduleUnsettled(g, "1001", payment.UnsettledLateApproval, t0.Add(-45*time.Minute))
+	g.tx(0)
+	g.gw.byID["1001"] = gp("1001", "approved", "221")
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(metrics.RefundsPending))
+	assert.InDelta(t, (45 * time.Minute).Seconds(), testutil.ToFloat64(metrics.RefundsPendingOldestAge), 1)
+	g.assertDB()
+}
+
+func TestGateway_AReconciledSecondApprovalIsScheduledNotReportedAsAFailure(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	g.gw.found = []payment.GatewayPayment{gp("1002", "approved", "221"), gp("1001", "approved", "221")}
+	g.tx(1) // the first approval settles the payment
+	g.tx(0) // the second one is only recorded
+
+	err := g.svc.reconcile(context.Background(), g.reload())
+
+	assert.NoError(t, err, "a handled extra approval is not an error of the step")
+	assert.Equal(t, payment.StatusApproved, g.reload().Status)
+	assert.Equal(t, 1, pendingUnsettled(g))
 	g.assertDB()
 }
