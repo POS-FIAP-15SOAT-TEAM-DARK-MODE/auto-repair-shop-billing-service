@@ -23,8 +23,9 @@ const (
 	updateQuery     = `UPDATE payment SET status = $2, external_id = $3, gateway_payment_id = $4, checkout_url = $5,
 		refund_requested_at = $6, checkout_closed_at = $7, updated_at = CURRENT_TIMESTAMP WHERE id = $1`
 
-	workPrefix = selectCols + ` WHERE provider = 'mercadopago' AND `
-	workSuffix = ` ORDER BY created_at, id LIMIT $1`
+	workPrefix       = selectCols + ` WHERE provider = 'mercadopago' AND `
+	workSuffix       = ` ORDER BY last_checked_at NULLS FIRST, created_at, id LIMIT $1`
+	markCheckedQuery = `UPDATE payment SET last_checked_at = $2 WHERE id = $1`
 )
 
 // Postgres implements payment.Repository on the billing database.
@@ -53,7 +54,8 @@ func (r *Postgres) ListWork(ctx context.Context, ex db.Executor, kind payment.Wo
 	case payment.WorkCreateCheckout:
 		query = workPrefix + `status = 'PENDING' AND external_id IS NULL` + workSuffix
 	case payment.WorkReconcile:
-		query = workPrefix + `status = 'PENDING' AND external_id IS NOT NULL` + workSuffix
+		query = workPrefix + `status = 'PENDING' AND external_id IS NOT NULL AND (last_checked_at IS NULL OR last_checked_at < $2)` + workSuffix
+		args = append(args, now.Add(-payment.ReconcileEvery))
 	case payment.WorkExpire:
 		query = workPrefix + `status = 'PENDING' AND expires_at IS NOT NULL AND expires_at < $2` + workSuffix
 		args = append(args, now)
@@ -132,4 +134,10 @@ func timePtr(n sql.NullTime) *time.Time {
 	}
 	t := n.Time
 	return &t
+}
+
+// MarkChecked stores when the gateway worker last looked at the payment.
+func (r *Postgres) MarkChecked(ctx context.Context, ex db.Executor, id string, at time.Time) error {
+	_, err := ex.ExecContext(ctx, markCheckedQuery, id, at)
+	return err
 }

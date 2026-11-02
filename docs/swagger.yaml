@@ -47,7 +47,7 @@ paths:
   /v1/payments/{id}/confirm:
     post:
       summary: Approve a PENDING payment (emits PaymentApproved)
-      description: Attendant and admin. In mercadopago mode a payment that already has a checkout answers 409, because Mercado Pago decides its status.
+      description: Attendant and admin. In mercadopago mode a payment charged through Mercado Pago answers 409, because Mercado Pago decides its status.
       parameters:
         - name: id
           in: path
@@ -66,7 +66,7 @@ paths:
   /v1/payments/{id}/reject:
     post:
       summary: Reject a PENDING payment (emits PaymentFailed with reason PAYMENT_REJECTED)
-      description: Attendant and admin. In mercadopago mode a payment that already has a checkout answers 409, because Mercado Pago decides its status.
+      description: Attendant and admin. In mercadopago mode a payment charged through Mercado Pago answers 409, because Mercado Pago decides its status.
       parameters:
         - name: id
           in: path

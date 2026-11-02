@@ -152,7 +152,19 @@ func classify(op string, err error) error {
 	transient := true
 	var re *mperror.ResponseError
 	if errors.As(err, &re) {
-		transient = re.StatusCode == 429 || re.StatusCode >= 500
+		transient = isTransientStatus(re.StatusCode)
 	}
 	return &payment.GatewayError{Transient: transient, Err: fmt.Errorf("%s: %w", op, err)}
+}
+
+// isTransientStatus says which HTTP answers are worth retrying. Besides 429 and 5xx, a 401 or 403 (a
+// token that was rotated or lacks a permission), a 408 and a 409 (an idempotent call still running) do
+// not say anything about the request itself, so they are retried and the payment is not failed for a
+// problem of configuration. The other 4xx answers (400, 404, 422...) mean the request is wrong.
+func isTransientStatus(status int) bool {
+	switch status {
+	case 401, 403, 408, 409, 429:
+		return true
+	}
+	return status >= 500
 }

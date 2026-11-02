@@ -108,7 +108,7 @@ func TestErrorsAreClassifiedAsTransientOrPermanent(t *testing.T) {
 		_, err := g.CreateCheckout(context.Background(), payment.CheckoutRequest{PaymentID: "x", Title: "t", Amount: decimal.NewFromInt(1), ExpiresAt: time.Now()})
 		return err
 	}
-	for status, transient := range map[int]bool{400: false, 401: false, 403: false, 404: false, 429: true, 500: true, 503: true} {
+	for status, transient := range map[int]bool{400: false, 404: false, 422: false, 401: true, 403: true, 408: true, 409: true, 429: true, 500: true, 503: true} {
 		g, _ := newGateway(t, map[string]answer{"POST /checkout/preferences": {status, `{"message":"nope","status":0}`}})
 		err := create(g)
 		require.Error(t, err, status)
@@ -170,7 +170,7 @@ func TestRefund_UsesAnIdempotencyKey(t *testing.T) {
 	g, _ = newGateway(t, map[string]answer{"POST /v1/payments/12/refunds": {401, `{"message":"Unauthorized use of live credentials","error":"unauthorized","status":401}`}})
 	err := g.Refund(context.Background(), "12")
 	require.Error(t, err)
-	assert.False(t, payment.IsTransient(err), "the 401 seen in the sandbox is permanent")
+	assert.True(t, payment.IsTransient(err), "the 401 seen in the sandbox is retried: it can be a token that gets fixed")
 
 	assert.Error(t, g.Refund(context.Background(), "x"))
 }

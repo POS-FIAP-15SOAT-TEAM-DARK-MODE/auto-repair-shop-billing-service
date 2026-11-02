@@ -46,5 +46,6 @@ func TestIsTransient(t *testing.T) {
 
 func TestGatewayManaged(t *testing.T) {
 	assert.False(t, (&Payment{}).GatewayManaged())
-	assert.True(t, (&Payment{ExternalID: "pref-1"}).GatewayManaged())
+	assert.False(t, (&Payment{Provider: ProviderName, ExternalID: "pref-1"}).GatewayManaged())
+	assert.True(t, (&Payment{Provider: ProviderMercadoPago}).GatewayManaged(), "even before the checkout exists")
 }

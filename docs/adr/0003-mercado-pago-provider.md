@@ -41,7 +41,7 @@ not hold the database transaction of a command. The saga, its message contracts 
 8. **Refund.** `RefundPayment` on an approved gateway payment only records `refund_requested_at`;
    `PaymentRefunded` is published after Mercado Pago confirms the refund. On a pending payment it cancels it,
    and the worker expires the checkout and cancels an in-process gateway payment.
-9. **Manual endpoints.** `confirm` and `reject` answer `409` for a payment that already has a checkout.
+9. **Manual endpoints.** `confirm` and `reject` answer `409` for every payment charged through Mercado Pago, with or without a checkout yet, so an attendant's decision cannot race the checkout creation.
 10. **Visibility.** `GET /v1/payments/:serviceOrderId` stays attendant and admin only (project decision R10)
     and now returns `checkout_url` and `expires_at`; the attendant hands the link to the customer.
 11. **Data.** Migration `000002` adds `external_id`, `gateway_payment_id`, `checkout_url`, `expires_at`,
@@ -60,5 +60,11 @@ not hold the database transaction of a command. The saga, its message contracts 
   approval is only logged and needs a manual refund; a refund or chargeback made outside the saga on an
   `APPROVED` payment is seen only through the webhook, because the reconciliation covers `PENDING` payments; the real webhook is verified once the service runs in
   the AWS Lab.
+- The worker stamps `payment.last_checked_at` (migration `000003`) and serves the least recently checked first,
+  so a payment that keeps failing cannot starve the others; the reconciliation looks at a payment at most every
+  30 seconds. A gateway answer of 401, 403, 408 or 409 is retried (a rotated token must not fail customers'
+  payments); only 400, 404 and 422 are permanent. A refused refund reads the payment before giving up, a
+  payment that closes without knowing its gateway payment id is searched once, an approval that cannot be
+  settled makes the worker back off, and a live attempt is not overridden by an older refusal.
 - The backoff and the "refund already submitted" marker live in memory. After a restart a step simply runs
   again, which is safe because the gateway calls are idempotent.

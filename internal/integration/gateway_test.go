@@ -128,6 +128,14 @@ func setupGateway(t *testing.T) *gwEnv {
 	return e
 }
 
+// pass lets the reconciliation interval go by, then runs one pass of the gateway worker.
+func (e *gwEnv) pass() {
+	e.t.Helper()
+	_, err := e.db.ExecContext(e.ctx, "UPDATE payment SET last_checked_at = last_checked_at - interval '1 minute'")
+	require.NoError(e.t, err)
+	e.svc.ProcessGatewayWork(e.ctx)
+}
+
 // requestPayment delivers RequestPayment the way the consumer does: inside a transaction.
 func (e *gwEnv) requestPayment() *payment.Payment {
 	e.t.Helper()
@@ -178,13 +186,13 @@ func TestGateway_RequestPaymentAndTheWorkerOpenTheCheckoutOnPostgres(t *testing.
 	assert.WithinDuration(t, e.now.Add(48*time.Hour), *p.ExpiresAt, time.Minute)
 	assert.Empty(t, p.ExternalID)
 
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 	got := e.reload()
 	assert.Equal(t, "pref-"+p.ID, got.ExternalID)
 	assert.Equal(t, "https://mp/init/"+p.ID, got.CheckoutURL)
 	assert.Equal(t, 1, e.gw.created)
 
-	e.svc.ProcessGatewayWork(e.ctx) // nothing to open again
+	e.pass() // nothing to open again
 	assert.Equal(t, 1, e.gw.created)
 	assert.Empty(t, e.outboxTypes(), "no saga event while the payment is pending")
 }
@@ -192,10 +200,10 @@ func TestGateway_RequestPaymentAndTheWorkerOpenTheCheckoutOnPostgres(t *testing.
 func TestGateway_ReconciliationSettlesAnApprovalThenARefundCompletesTheCycle(t *testing.T) {
 	e := setupGateway(t)
 	p := e.requestPayment()
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 
 	e.gw.put(gwPayment(p.ID, "1001", "approved"))
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 	got := e.reload()
 	assert.Equal(t, payment.StatusApproved, got.Status)
 	assert.Equal(t, "1001", got.GatewayPaymentID)
@@ -209,7 +217,7 @@ func TestGateway_ReconciliationSettlesAnApprovalThenARefundCompletesTheCycle(t *
 	assert.Equal(t, payment.StatusApproved, e.reload().Status)
 	assert.NotNil(t, e.reload().RefundRequestedAt)
 
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 	final := e.reload()
 	assert.Equal(t, payment.StatusRefunded, final.Status)
 	assert.NotNil(t, final.CheckoutClosedAt, "the checkout of a finished payment is closed")
@@ -219,15 +227,15 @@ func TestGateway_ReconciliationSettlesAnApprovalThenARefundCompletesTheCycle(t *
 func TestGateway_ExpiryOfAnInProcessPaymentRejectsItOnPostgres(t *testing.T) {
 	e := setupGateway(t)
 	p := e.requestPayment()
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 	e.gw.put(gwPayment(p.ID, "1001", "in_process"))
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 	assert.Equal(t, "1001", e.reload().GatewayPaymentID)
 	assert.Equal(t, payment.StatusPending, e.reload().Status)
 
 	_, err := e.db.ExecContext(e.ctx, "UPDATE payment SET expires_at = now() - interval '1 hour' WHERE id = $1", p.ID)
 	require.NoError(t, err)
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 
 	assert.Equal(t, payment.StatusRejected, e.reload().Status)
 	assert.Equal(t, "cancelled", e.gw.payments["1001"].Status, "the gateway payment was cancelled")
@@ -237,7 +245,7 @@ func TestGateway_ExpiryOfAnInProcessPaymentRejectsItOnPostgres(t *testing.T) {
 func TestGateway_ConcurrentNotificationsApplyTheApprovalOnce(t *testing.T) {
 	e := setupGateway(t)
 	p := e.requestPayment()
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 
 	var wg sync.WaitGroup
 	results := make(chan billing.ApplyResult, 8)
@@ -279,7 +287,7 @@ func signedWebhook(secret, dataID, requestID string, at time.Time) *http.Request
 func TestGateway_WebhookWithAValidSignatureSettlesThePayment(t *testing.T) {
 	e := setupGateway(t)
 	p := e.requestPayment()
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 	e.gw.put(gwPayment(p.ID, "186237542593", "approved"))
 
 	rec := httptest.NewRecorder()
@@ -299,7 +307,7 @@ func TestGateway_WebhookWithAValidSignatureSettlesThePayment(t *testing.T) {
 func TestGateway_WebhookWithAWrongOrStaleSignatureIsRefused(t *testing.T) {
 	e := setupGateway(t)
 	p := e.requestPayment()
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 	e.gw.put(gwPayment(p.ID, "186237542593", "approved"))
 
 	for name, req := range map[string]*http.Request{
@@ -317,7 +325,7 @@ func TestGateway_WebhookWithAWrongOrStaleSignatureIsRefused(t *testing.T) {
 func TestGateway_ManualConfirmIsRefusedOnceTheCheckoutExists(t *testing.T) {
 	e := setupGateway(t)
 	p := e.requestPayment()
-	e.svc.ProcessGatewayWork(e.ctx)
+	e.pass()
 	assert.ErrorIs(t, e.svc.Confirm(e.ctx, p.ID, "req-1"), payment.ErrGatewayManaged)
 	assert.Equal(t, payment.StatusPending, e.reload().Status)
 }

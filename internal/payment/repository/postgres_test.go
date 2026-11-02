@@ -149,7 +149,7 @@ func TestPostgres_ListWork(t *testing.T) {
 		args  []driver.Value
 	}{
 		{payment.WorkCreateCheckout, "status = 'PENDING' AND external_id IS NULL", []driver.Value{20}},
-		{payment.WorkReconcile, "status = 'PENDING' AND external_id IS NOT NULL", []driver.Value{20}},
+		{payment.WorkReconcile, "status = 'PENDING' AND external_id IS NOT NULL AND \\(last_checked_at IS NULL", []driver.Value{20, now.Add(-payment.ReconcileEvery)}},
 		{payment.WorkExpire, "expires_at < \\$2", []driver.Value{20, now}},
 		{payment.WorkRefund, "status = 'APPROVED' AND refund_requested_at IS NOT NULL", []driver.Value{20}},
 		{payment.WorkCloseCheckout, "checkout_closed_at IS NULL", []driver.Value{20}},
@@ -182,4 +182,49 @@ func TestPostgres_ListWork(t *testing.T) {
 		_, err = NewPostgres().ListWork(context.Background(), db, payment.WorkReconcile, now, 1)
 		assert.Error(t, err)
 	})
+}
+
+func TestPostgres_MarkChecked(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	at := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	mock.ExpectExec("UPDATE payment SET last_checked_at").WithArgs("p1", at).WillReturnResult(sqlmock.NewResult(0, 1))
+	require.NoError(t, NewPostgres().MarkChecked(context.Background(), db, "p1", at))
+	mock.ExpectExec("UPDATE payment SET last_checked_at").WillReturnError(errors.New("boom"))
+	assert.EqualError(t, NewPostgres().MarkChecked(context.Background(), db, "p1", at), "boom")
+}
+
+func TestPostgres_ListWorkServesTheLeastRecentlyCheckedFirst(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	mock.ExpectQuery("ORDER BY last_checked_at NULLS FIRST").WithArgs(20, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows(payCols))
+	_, err := NewPostgres().ListWork(context.Background(), db, payment.WorkReconcile, time.Now(), 20)
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestInMemory_ListWorkRotatesAndWaitsBetweenLooks(t *testing.T) {
+	repo := NewInMemory()
+	now := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	for _, id := range []string{"a", "b", "c"} {
+		require.NoError(t, repo.Create(context.Background(), nil, &payment.Payment{ID: id, Provider: payment.ProviderMercadoPago,
+			Status: payment.StatusPending, ExternalID: "pref-" + id}))
+	}
+	ids := func() []string {
+		got, err := repo.ListWork(context.Background(), nil, payment.WorkReconcile, now, 2)
+		require.NoError(t, err)
+		var out []string
+		for _, p := range got {
+			out = append(out, p.ID)
+		}
+		return out
+	}
+	assert.Equal(t, []string{"a", "b"}, ids())
+
+	require.NoError(t, repo.MarkChecked(context.Background(), nil, "a", now))
+	require.NoError(t, repo.MarkChecked(context.Background(), nil, "b", now))
+	assert.Equal(t, []string{"c"}, ids(), "the ones just checked wait for ReconcileEvery")
+
+	now = now.Add(payment.ReconcileEvery + time.Second)
+	assert.Equal(t, []string{"c", "a"}, ids(), "never checked first, then the oldest check")
 }

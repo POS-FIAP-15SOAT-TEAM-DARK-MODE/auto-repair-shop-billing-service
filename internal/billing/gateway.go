@@ -50,6 +50,11 @@ func (s *Service) HandleGatewayNotification(ctx context.Context, gatewayPaymentI
 	}
 	gp, err := s.gateway.GetPayment(ctx, gatewayPaymentID)
 	if err != nil {
+		if !payment.IsTransient(err) {
+			// the gateway does not know the payment (or refuses the request for good): a retry cannot help
+			logger.Of(ctx).Warn("gateway payment of a notification not found", zap.String("gateway_payment_id", gatewayPaymentID), zap.Error(err))
+			return ResultUnknown, nil
+		}
 		return ResultIgnored, err
 	}
 	return s.ApplyGatewayPayment(ctx, gp)
@@ -193,7 +198,15 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 			if !s.retry.ready(key, now) {
 				continue
 			}
-			if err := step.run(ctx, p); err != nil {
+			err := step.run(ctx, p)
+			// Stamp every look, so the next pass starts with the payments seen least recently. A checkout
+			// just opened is not stamped: its first reconciliation should not wait.
+			if step.kind != payment.WorkCreateCheckout || err != nil {
+				if markErr := s.payments.MarkChecked(ctx, s.db, p.ID, now); markErr != nil {
+					logger.Of(ctx).Error(markErr, zap.String("component", "gateway-worker"), zap.String("payment_id", p.ID))
+				}
+			}
+			if err != nil {
 				s.retry.fail(key, now)
 				s.logStepError(ctx, step.kind, p, err)
 				continue
@@ -261,17 +274,37 @@ func (s *Service) createCheckout(ctx context.Context, p *payment.Payment) error 
 	})
 }
 
-// reconcile asks the gateway for the payments of a checkout and applies them, approved first.
+// reconcile asks the gateway for the payments of a checkout and applies them. An approved attempt wins;
+// while an attempt is still live (pending, in process) an older failed one is not applied, since the
+// customer may have tried again after a refusal. An approval that cannot be settled (another amount) is
+// returned as an error: it needs a person, and the worker backs off instead of logging it every pass.
 func (s *Service) reconcile(ctx context.Context, p *payment.Payment) error {
 	found, err := s.gateway.FindPayments(ctx, p.ID)
 	if err != nil {
 		return err
 	}
-	sort.SliceStable(found, func(i, j int) bool { return found[i].Status == "approved" && found[j].Status != "approved" })
+	rank := func(gp payment.GatewayPayment) int {
+		switch st, _ := payment.MapGatewayStatus(gp.Status); {
+		case st == payment.StatusApproved:
+			return 0
+		case st == payment.StatusPending:
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(found, func(i, j int) bool { return rank(found[i]) < rank(found[j]) })
+	live := len(found) > 0 && rank(found[0]) <= 1
 	for _, gp := range found {
+		if live && rank(gp) == 2 {
+			continue
+		}
 		gp.ExternalReference = p.ID
-		if _, err := s.ApplyGatewayPayment(ctx, gp); err != nil {
+		res, err := s.ApplyGatewayPayment(ctx, gp)
+		if err != nil {
 			return err
+		}
+		if res == ResultIgnored && rank(gp) == 0 {
+			return fmt.Errorf("approved gateway payment %s was not settled: needs manual review", gp.ID)
 		}
 	}
 	return nil
@@ -302,15 +335,22 @@ func (s *Service) expire(ctx context.Context, p *payment.Payment) error {
 }
 
 // refund asks the gateway to refund an approved payment and settles it only once the gateway says so.
+// A permanent refusal is not final: the refund may already exist (made from the seller's panel, or in an
+// earlier run past the idempotency window), so the payment is read before giving up.
 func (s *Service) refund(ctx context.Context, p *payment.Payment) error {
 	if p.GatewayPaymentID == "" {
 		return errors.New("refund requested for a payment without a gateway payment id")
 	}
+	var refundErr error
 	if !s.retry.refundSubmitted(p.ID) {
 		if err := s.gateway.Refund(ctx, p.GatewayPaymentID); err != nil {
-			return err
+			if payment.IsTransient(err) {
+				return err
+			}
+			refundErr = err
+		} else {
+			s.retry.markRefundSubmitted(p.ID)
 		}
-		s.retry.markRefundSubmitted(p.ID)
 	}
 	gp, err := s.gateway.GetPayment(ctx, p.GatewayPaymentID)
 	if err != nil {
@@ -321,8 +361,12 @@ func (s *Service) refund(ctx context.Context, p *payment.Payment) error {
 		return err
 	}
 	if st, ok := payment.MapGatewayStatus(gp.Status); !ok || st != payment.StatusRefunded {
+		if refundErr != nil {
+			return refundErr
+		}
 		return errNotYet
 	}
+	s.retry.forgetRefund(p.ID)
 	return nil
 }
 
@@ -332,6 +376,11 @@ func (s *Service) refund(ctx context.Context, p *payment.Payment) error {
 func (s *Service) closeCheckout(ctx context.Context, p *payment.Payment) error {
 	if p.Status == payment.StatusCancelled && p.GatewayPaymentID != "" {
 		if err := s.gateway.CancelPayment(ctx, p.GatewayPaymentID); err != nil && payment.IsTransient(err) {
+			return err
+		}
+	}
+	if p.GatewayPaymentID == "" && (p.Status == payment.StatusCancelled || p.Status == payment.StatusRejected) {
+		if err := s.sweepUnknownPayments(ctx, p); err != nil {
 			return err
 		}
 	}
@@ -347,6 +396,30 @@ func (s *Service) closeCheckout(ctx context.Context, p *payment.Payment) error {
 		pay.CheckoutClosedAt = &closed
 		return s.payments.Update(ctx, tx, pay)
 	})
+}
+
+// sweepUnknownPayments looks once for gateway payments of a payment that closed without ever learning
+// its gateway payment id (a customer who started a Pix while the order was being cancelled). One still
+// in process is cancelled; an approved one is applied, which logs that it needs a manual refund.
+func (s *Service) sweepUnknownPayments(ctx context.Context, p *payment.Payment) error {
+	found, err := s.gateway.FindPayments(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	for _, gp := range found {
+		gp.ExternalReference = p.ID
+		switch st, _ := payment.MapGatewayStatus(gp.Status); st {
+		case payment.StatusPending:
+			if err := s.gateway.CancelPayment(ctx, gp.ID); err != nil && payment.IsTransient(err) {
+				return err
+			}
+		case payment.StatusApproved:
+			if _, err := s.ApplyGatewayPayment(ctx, gp); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // settle moves a PENDING payment to a final status and answers the saga, unless it is no longer
@@ -428,6 +501,12 @@ func (r *retryState) refundSubmitted(paymentID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.submitted[paymentID]
+}
+
+func (r *retryState) forgetRefund(paymentID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.submitted, paymentID)
 }
 
 func (r *retryState) markRefundSubmitted(paymentID string) {

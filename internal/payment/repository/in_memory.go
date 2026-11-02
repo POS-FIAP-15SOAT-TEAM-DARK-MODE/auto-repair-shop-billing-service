@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
@@ -10,7 +11,8 @@ import (
 
 // InMemory implements payment.Repository for unit tests. Insertion order is creation order.
 type InMemory struct {
-	items []*payment.Payment
+	items   []*payment.Payment
+	checked map[string]time.Time
 }
 
 func NewInMemory() *InMemory {
@@ -61,20 +63,41 @@ func (r *InMemory) Update(_ context.Context, _ db.Executor, p *payment.Payment) 
 	return payment.ErrNotFound
 }
 
-// ListWork mirrors the WHERE clauses of the Postgres repository.
+// ListWork mirrors the WHERE and ORDER BY of the Postgres repository.
 func (r *InMemory) ListWork(_ context.Context, _ db.Executor, kind payment.WorkKind, now time.Time, limit int) ([]*payment.Payment, error) {
 	var out []*payment.Payment
 	for _, p := range r.items {
 		if p.Provider != payment.ProviderMercadoPago || !matchesWork(p, kind, now) {
 			continue
 		}
+		if at, ok := r.checked[p.ID]; kind == payment.WorkReconcile && ok && !at.Before(now.Add(-payment.ReconcileEvery)) {
+			continue
+		}
 		cp := *p
 		out = append(out, &cp)
-		if limit > 0 && len(out) == limit {
-			break
+	}
+	// never checked first, then the oldest check; the sort is stable so creation order breaks ties
+	sort.SliceStable(out, func(i, j int) bool {
+		ai, iok := r.checked[out[i].ID]
+		aj, jok := r.checked[out[j].ID]
+		if iok != jok {
+			return !iok
 		}
+		return ai.Before(aj)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
+}
+
+// MarkChecked remembers when the worker looked at the payment.
+func (r *InMemory) MarkChecked(_ context.Context, _ db.Executor, id string, at time.Time) error {
+	if r.checked == nil {
+		r.checked = map[string]time.Time{}
+	}
+	r.checked[id] = at
+	return nil
 }
 
 func matchesWork(p *payment.Payment, kind payment.WorkKind, now time.Time) bool {

@@ -21,6 +21,7 @@ type fakeGateway struct {
 	created   []payment.CheckoutRequest
 
 	found   []payment.GatewayPayment
+	finds   int
 	findErr error
 	byID    map[string]payment.GatewayPayment
 	getErr  error
@@ -38,6 +39,7 @@ func (f *fakeGateway) CreateCheckout(_ context.Context, r payment.CheckoutReques
 	return f.checkout, f.createErr
 }
 func (f *fakeGateway) FindPayments(context.Context, string) ([]payment.GatewayPayment, error) {
+	f.finds++
 	return append([]payment.GatewayPayment(nil), f.found...), f.findErr
 }
 func (f *fakeGateway) GetPayment(_ context.Context, id string) (payment.GatewayPayment, error) {
@@ -660,4 +662,140 @@ func TestGateway_PublishOutcomeIgnoresStatusesWithoutAnEvent(t *testing.T) {
 	g := newGatewayHarness(t)
 	g.begin()
 	assert.NoError(t, g.svc.publishOutcome(context.Background(), g.harness.tx, &payment.Payment{}, payment.StatusPending))
+}
+
+// ---- review fixes ----
+
+func TestGateway_RefundRefusedButAlreadyDoneAtTheGatewayIsSettled(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) {
+		withCheckout(p)
+		p.Status, p.GatewayPaymentID = payment.StatusApproved, "1001"
+		requested := t0
+		p.RefundRequestedAt = &requested
+	})
+	g.gw.refundErr = permanent                        // the refund already exists (made from the seller's panel)
+	g.gw.byID["1001"] = gp("1001", "refunded", "221") // and the payment says so
+	g.tx(1)                                           // PaymentRefunded
+	g.tx(0)                                           // then the checkout is closed
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, payment.StatusRefunded, g.reload().Status)
+	assert.Empty(t, g.svc.retry.submitted, "the submitted marker is dropped once the refund is confirmed")
+	g.assertDB()
+}
+
+func TestGateway_RefundRefusedAndStillApprovedReturnsTheRefusal(t *testing.T) {
+	g := newGatewayHarness(t)
+	p := g.seedGatewayPayment(func(p *payment.Payment) {
+		withCheckout(p)
+		p.Status, p.GatewayPaymentID = payment.StatusApproved, "1001"
+	})
+	g.gw.refundErr = permanent
+	g.gw.byID["1001"] = gp("1001", "approved", "221")
+	g.tx(0)
+	assert.ErrorIs(t, g.svc.refund(context.Background(), p), permanent)
+	g.assertDB()
+}
+
+func TestGateway_UnsettledApprovalBacksOffInsteadOfLoggingEveryPass(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	g.gw.found = []payment.GatewayPayment{gp("1001", "approved", "200")} // another amount
+	g.tx(0)
+
+	g.svc.ProcessGatewayWork(context.Background())
+	assert.Equal(t, 1, g.gw.finds)
+
+	g.now = g.now.Add(time.Second) // still inside the backoff
+	g.svc.ProcessGatewayWork(context.Background())
+	assert.Equal(t, 1, g.gw.finds, "the payment waits for its backoff")
+	assert.Equal(t, payment.StatusPending, g.reload().Status)
+	g.assertDB()
+}
+
+func TestGateway_ALiveAttemptIsNotOverriddenByAnOlderRefusal(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	// the card was refused, then the customer tried a Pix that is still in process (newest first)
+	g.gw.found = []payment.GatewayPayment{gp("1002", "in_process", "221"), gp("1001", "rejected", "221")}
+	g.tx(0) // only the live attempt is applied: its id is remembered
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	got := g.reload()
+	assert.Equal(t, payment.StatusPending, got.Status)
+	assert.Equal(t, "1002", got.GatewayPaymentID)
+	g.assertDB()
+}
+
+func TestGateway_ARefusalAloneStillRejects(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	g.gw.found = []payment.GatewayPayment{gp("1001", "rejected", "221")}
+	g.tx(1)
+	g.tx(0) // the checkout is closed in the same pass
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, payment.StatusRejected, g.reload().Status)
+	g.assertDB()
+}
+
+func TestGateway_ClosingACancelledPaymentCancelsAPixItNeverHeardOf(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) { withCheckout(p); p.Status = payment.StatusCancelled })
+	g.gw.found = []payment.GatewayPayment{gp("1005", "in_process", "221")}
+	g.tx(0)
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, []string{"1005"}, g.gw.cancelled)
+	assert.Equal(t, []string{"pref-1"}, g.gw.expired)
+	assert.NotNil(t, g.reload().CheckoutClosedAt)
+	g.assertDB()
+}
+
+func TestGateway_ClosingACancelledPaymentFlagsAnApprovalItNeverHeardOf(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) { withCheckout(p); p.Status = payment.StatusRejected })
+	g.gw.found = []payment.GatewayPayment{gp("1005", "approved", "221")}
+	g.tx(0) // applying a late approval changes nothing and only logs that it needs a refund
+	g.tx(0) // closing
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Empty(t, g.gw.cancelled)
+	assert.Equal(t, payment.StatusRejected, g.reload().Status)
+	g.assertDB()
+}
+
+func TestGateway_ClosingRetriesWhenTheLookForUnknownPaymentsFails(t *testing.T) {
+	g := newGatewayHarness(t)
+	p := g.seedGatewayPayment(func(p *payment.Payment) { withCheckout(p); p.Status = payment.StatusCancelled })
+	g.gw.findErr = transient
+	assert.ErrorIs(t, g.svc.closeCheckout(context.Background(), p), transient)
+	assert.Empty(t, g.gw.expired)
+}
+
+func TestGateway_NotificationForAnUnknownGatewayPaymentIsAcknowledged(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.gw.getErr = &payment.GatewayError{Transient: false, Err: errors.New("not found")}
+	res, err := g.svc.HandleGatewayNotification(context.Background(), "999")
+	require.NoError(t, err)
+	assert.Equal(t, ResultUnknown, res)
+
+	g.gw.getErr = transient
+	_, err = g.svc.HandleGatewayNotification(context.Background(), "999")
+	assert.ErrorIs(t, err, transient, "a transient failure makes the gateway retry")
+}
+
+func TestGateway_ManualDecisionIsRefusedBeforeTheCheckoutExistsToo(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(nil) // no checkout yet
+	g.mock.ExpectBegin()
+	g.mock.ExpectRollback()
+	assert.ErrorIs(t, g.svc.Confirm(context.Background(), "pay-1", "req-1"), payment.ErrGatewayManaged)
+	g.assertDB()
 }
