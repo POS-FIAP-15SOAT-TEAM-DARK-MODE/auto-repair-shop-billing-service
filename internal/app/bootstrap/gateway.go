@@ -19,7 +19,7 @@ import (
 //	MERCADOPAGO_ACCESS_TOKEN       required
 //	MERCADOPAGO_WEBHOOK_SECRET     signs the webhook; empty rejects every webhook
 //	MERCADOPAGO_NOTIFICATION_URL   public HTTPS URL of the webhook; empty means "do not send"
-//	MERCADOPAGO_CHECKOUT_TTL       lifetime of a checkout (default 48h)
+//	MERCADOPAGO_CHECKOUT_TTL       lifetime of a checkout (default 12h)
 //	MERCADOPAGO_WEBHOOK_TOLERANCE  accepted distance of the signature timestamp (default 5m)
 //	GATEWAY_WORKER_INTERVAL        how often the worker runs (default 5s)
 func gatewayMode(service *billing.Service) (*billing.Controller, []app.Server, error) {
@@ -39,7 +39,7 @@ func gatewayMode(service *billing.Service) (*billing.Controller, []app.Server, e
 	service.WithGateway(billing.GatewayConfig{
 		Gateway:         gateway,
 		NotificationURL: env.GetString("MERCADOPAGO_NOTIFICATION_URL", ""),
-		CheckoutTTL:     env.GetTimeDuration("MERCADOPAGO_CHECKOUT_TTL", 48*time.Hour),
+		CheckoutTTL:     env.GetTimeDuration("MERCADOPAGO_CHECKOUT_TTL", 12*time.Hour),
 	})
 	controller := billing.NewController(service).WithWebhook(mercadopago.Verifier{
 		Secret:    secret,

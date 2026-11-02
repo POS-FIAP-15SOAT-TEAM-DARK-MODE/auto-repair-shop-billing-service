@@ -44,7 +44,7 @@ sequenceDiagram
     C->>SO: Accept budget
     SO->>B: RequestPayment (saga_id, amount)
     B->>B: Persist Payment PENDING, commit
-    B->>MP: Create preference (items, external_reference, expiry 48 h)
+    B->>MP: Create preference (items, external_reference, expiry 12 h)
     MP-->>B: preference id + init_point
     B->>B: Store external_id + checkout_url
     A->>B: GET /v1/payments/{serviceOrderId}
@@ -109,7 +109,7 @@ The existing `InternalProvider` keeps its current `Charge`/`Refund` behaviour. T
   - `items[]`: `title`, `quantity`, `unit_price`, `currency_id: "BRL"`. `unit_price` is a decimal number in reais: `10` charged R$ 10,00. The SDK models it as `float64`, so the cents-to-float conversion happens only inside the provider. Items come from the budget lines; the total must equal the payment amount.
   - `external_reference` = our `payment.id`.
   - `notification_url` (HTTPS, public; localhost not allowed; takes priority over the panel URL) [doc]; omitted when empty.
-  - `expires: true` and `expiration_date_to` (now + 48 h, UTC).
+  - `expires: true` and `expiration_date_to` (now + 12 h, UTC).
   - No `back_urls` / `auto_return`: there is no frontend.
 - Response: preference `id` (store it), `init_point` and `sandbox_init_point`. **Use `init_point` only** (decision 16): it opened and took payments with test users; `sandbox_init_point` (`sandbox.mercadopago.com.br`) showed a generic "Ops, ocorreu um erro". [poc]
 - **Installments add interest for the buyer.** With 2x selected the checkout added R$ 0,96 to a R$ 10 item (total R$ 10,96). The payment then carries `transaction_amount` (10, our price) and `transaction_details.total_paid_amount` (10,96). Compare and settle against `transaction_amount` (decision 14). Installments stay allowed (decision 17). [poc]
@@ -174,7 +174,7 @@ Observed in the sandbox, 1x credit card [poc]:
 Two consequences:
 
 - **A rejection does not end the checkout.** The rejection screen offers "Escolher outro meio", so the customer can pay again on the same preference, creating a second payment for the same `external_reference`. If `rejected` fails the order, the preference must be expired at that moment (§9), otherwise a later approval lands on a closed order.
-- **An `in_process` payment stays `PENDING`** while the checkout is valid, because it can still be approved or rejected. At the 48 h expiry it is cancelled at Mercado Pago and treated as rejected (decision 13).
+- **An `in_process` payment stays `PENDING`** while the checkout is valid, because it can still be approved or rejected. At the 12 h expiry it is cancelled at Mercado Pago and treated as rejected (decision 13).
 
 Timestamps such as `date_approved` come with a `-04:00` offset; parse them, do not assume UTC. [poc]
 
@@ -199,7 +199,7 @@ The docs advise handling `topic_merchant_order_wh` notifications and processing 
 - `RefundPayment` keeps its current contract (`PENDING → CANCELLED`, `APPROVED → REFUNDED`, `PaymentRefunded` only for the second). For Mercado Pago, `PaymentRefunded` is published only after Mercado Pago confirms the refund, not when the command is received, because today the internal provider marks `REFUNDED` inside the same transaction.
 - `RefundPayment` on a `PENDING` payment → mark `CANCELLED` locally and **expire the preference**; expiring is done with `PUT /checkout/preferences/{id}` and a past `expiration_date_to`, and the checkout page then answers "O que você queria pagar não está disponível. Ficou disponível até <data>". [poc] Cancelling a gateway payment that is not approved uses `PUT /v1/payments/{id}`. [doc]
 - **On `rejected`:** expire the preference as part of replying `PaymentFailed`, so the customer cannot retry into a failed order (§7). [poc, proposal]
-- **Expiry (48 h unpaid):** Billing owns the first answer. When `expires_at` passes, the reconciliation job expires the preference and replies `PaymentFailed` (`PAYMENT_REJECTED`) if the saga is still waiting: for a checkout that never received a payment (local `CANCELLED`) and for a payment Mercado Pago still holds as `in_process`, which is first cancelled at the gateway and then rejected (decision 13; if the cancellation fails the payment stays `PENDING` and is retried, and an approval that arrives first wins). The orchestrator's `PaymentTimeout` is only a backstop, configured longer than the preference expiry, so a late `PaymentFailed` is ignored when the saga has already moved on. The same gateway cancellation applies when the orchestrator's `RefundPayment` arrives for such a payment. [poc]
+- **Expiry (12 h unpaid):** Billing owns the first answer. When `expires_at` passes, the reconciliation job expires the preference and replies `PaymentFailed` (`PAYMENT_REJECTED`) if the saga is still waiting: for a checkout that never received a payment (local `CANCELLED`) and for a payment Mercado Pago still holds as `in_process`, which is first cancelled at the gateway and then rejected (decision 13; if the cancellation fails the payment stays `PENDING` and is retried, and an approval that arrives first wins). The orchestrator's `SAGA_PAYMENT_TIMEOUT` (24 h) is only a backstop, longer than the 12 h preference expiry, so a late `PaymentFailed` is ignored when the saga has already moved on. The same gateway cancellation applies when the orchestrator's `RefundPayment` arrives for such a payment. [poc]
 - Compensation is idempotent; every gateway action is appended to `payment_event`.
 
 ## 10. Decisions and remaining questions
@@ -211,7 +211,7 @@ The docs advise handling `topic_merchant_order_wh` notifications and processing 
 | 1 | Back URLs / frontend | No frontend: Billing only exposes the checkout URL; no `back_urls` or `auto_return`. |
 | 2 | Webhook exposure | Call Billing directly first, with no API Gateway. The notification URL is configuration. The AWS Academy Lab has no domain or certificate and Mercado Pago requires an HTTPS `notification_url` [doc], so the real webhook is tested in the AWS Lab; locally the webhook is mocked, and the deployed environment relies on the reconciliation job until HTTPS exists. |
 | 3 | Payment trigger | The saga: the orchestrator sends `RequestPayment` after the customer accepts the budget. Billing creates the checkout. |
-| 4 | Preference expiration | 48 hours. When it passes without a paid order, **Billing always replies `PaymentFailed`** (`PAYMENT_REJECTED`, the only reason in the contract) for an unpaid checkout and for an `in_process` payment alike (decision 13), so both end the order as `REJECTED`. The orchestrator's `PaymentTimeout` stays as a **backstop and is set longer than the preference** (for example 50 h); if it ever fires it compensates and cancels with `SAGA_TIMEOUT`, as it does today. |
+| 4 | Preference expiration | 12 hours. When it passes without a paid order, **Billing always replies `PaymentFailed`** (`PAYMENT_REJECTED`, the only reason in the contract) for an unpaid checkout and for an `in_process` payment alike (decision 13), so both end the order as `REJECTED`. The orchestrator's `PaymentTimeout` stays as a **backstop and is set longer than the preference**: it is `SAGA_PAYMENT_TIMEOUT=24h` today, so the checkout lasts 12 h by default instead of 48 h; if it ever fires it compensates and cancels with `SAGA_TIMEOUT`, as it does today. |
 | 5 | Client | Official Go SDK, wrapped by the Mercado Pago `PaymentProvider`. |
 | 6 | Payment methods | All methods. |
 | 7 | Saga style and broker | Orchestrated saga over SNS/SQS, as implemented in the bootstrap PRs. Billing only replies to the orchestrator and never changes the OS status itself. |
@@ -220,7 +220,7 @@ The docs advise handling `topic_merchant_order_wh` notifications and processing 
 | 10 | Saga and contracts | Unchanged (project decision D11): Mercado Pago plugs in as a provider. The command and event contracts, including `PaymentFailed.reason = PAYMENT_REJECTED`, stay as they are. |
 | 11 | Delivery | Branch from `develop` (PR #1 is merged), pull request back to `develop`; ADR 0003 closes this RFC and supersedes the "without gateway" part of ADR 0002. |
 | 12 | A rejection is final | When Mercado Pago rejects a payment, Billing expires the preference and replies `PaymentFailed` (`PAYMENT_REJECTED`), so no approval can arrive later on a rejected order. The customer cannot retry with another card on the same link; a new attempt is a new payment. |
-| 13 | `in_process` at expiry | At the 48 h expiry, a payment still `in_process` is **cancelled at Mercado Pago** (`PUT /v1/payments/{id}`) and treated as rejected: local `REJECTED` and `PaymentFailed` (`PAYMENT_REJECTED`) if the saga is still waiting. If Mercado Pago reports it approved before the cancellation succeeds, the approval wins and is applied. While it is `in_process` and not expired, it stays `PENDING`. |
+| 13 | `in_process` at expiry | At the 12 h expiry, a payment still `in_process` is **cancelled at Mercado Pago** (`PUT /v1/payments/{id}`) and treated as rejected: local `REJECTED` and `PaymentFailed` (`PAYMENT_REJECTED`) if the saga is still waiting. If Mercado Pago reports it approved before the cancellation succeeds, the approval wins and is applied. While it is `in_process` and not expired, it stays `PENDING`. |
 | 14 | Amount to settle | Compare and settle against `transaction_amount` (our price), not the total the buyer paid with installment interest. |
 | 15 | Webhook tests | Mock the webhook locally with a signed request (it still fetches the real payment from Mercado Pago); the real notification is verified once the service runs in the AWS Lab. |
 | 16 | Checkout URL | Use `init_point` only; `sandbox_init_point` is not stored or returned (it showed a generic error with test users). |
@@ -234,7 +234,7 @@ The docs advise handling `topic_merchant_order_wh` notifications and processing 
 3. **Refund through the API.** Find out why `POST /v1/payments/{id}/refunds` returns `401` / code 7 (credentials not activated, or a test-account limit) and whether it works in the AWS Lab with the credentials that will be used. The manual test of the Billing service reproduced it: the worker treats it as a permanent error, logs it, retries with backoff and leaves the payment `APPROVED` with no event.
 4. **Which overlays use `mercadopago`.** `lab` and `stg` use `auto-approve` and `prd` uses `manual` today. The AWS Lab has no domain or certificate, so `mercadopago` there depends on the reconciler; decide per overlay.
 5. **Gateway routes.** Add the webhook route to the gateway's `config/routes.yaml` (`auto-repair-shop`), and later, if needed, the public API Gateway route in `infra-k8s`.
-6. **Secrets and config.** Add `MERCADOPAGO_ACCESS_TOKEN` and `MERCADOPAGO_WEBHOOK_SECRET` to the Secrets Manager secret `auto-repair-shop-<env>/billing` (created by `infra-db`); the ExternalSecret already extracts every key, so no manifest change is needed for secrets. `MERCADOPAGO_NOTIFICATION_URL` and the non-secret settings go in the ConfigMap and the overlays. Set the orchestrator's `PaymentTimeout` longer than the preference expiry (decision 4).
+6. **Secrets and config.** Add `MERCADOPAGO_ACCESS_TOKEN` and `MERCADOPAGO_WEBHOOK_SECRET` to the Secrets Manager secret `auto-repair-shop-<env>/billing` (created by `infra-db`); the ExternalSecret already extracts every key, so no manifest change is needed for secrets. `MERCADOPAGO_NOTIFICATION_URL` and the non-secret settings go in the ConfigMap and the overlays. Keep `MERCADOPAGO_CHECKOUT_TTL` (12 h by default) below the orchestrator's `SAGA_PAYMENT_TIMEOUT` (24 h in `service-order-service`); otherwise the orchestrator cancels the order (`SAGA_TIMEOUT`) and sends `RefundPayment` before Billing answers (decision 4).
 7. **Payment approved after the order was cancelled.** If the customer pays while the orchestrator is cancelling (or after `RefundPayment` marked the payment `CANCELLED`), Mercado Pago can still approve it. The webhook must detect an approved payment whose local status is `CANCELLED` or `REJECTED` and refund it (the POC only flags it), since `CANCELLED -> APPROVED` is not a valid transition and the orchestrator ignores a late `PaymentApproved`.
 8. **Still unconfirmed [verify]:** the real webhook payload and headers; whether test-credential payments send notifications; how Mercado Pago reports an expired preference that had no payment; the `topic_merchant_order_wh` notifications; the real cancellation of an `in_process` payment.
 

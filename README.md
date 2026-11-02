@@ -33,7 +33,7 @@ results: RFC 0001). The service refuses to start without the access token.
 | `MERCADOPAGO_ACCESS_TOKEN` | required; the long `APP_USR-...` token of the seller (test) account |
 | `MERCADOPAGO_WEBHOOK_SECRET` | signs the webhook; empty rejects every webhook (payments then settle through the worker) |
 | `MERCADOPAGO_NOTIFICATION_URL` | public HTTPS URL of `POST /v1/webhooks/mercadopago`; empty means "do not send" |
-| `MERCADOPAGO_CHECKOUT_TTL` | lifetime of a checkout, default `48h` |
+| `MERCADOPAGO_CHECKOUT_TTL` | lifetime of a checkout, default `12h` (keep it below the orchestrator's `SAGA_PAYMENT_TIMEOUT`, `24h`) |
 | `GATEWAY_WORKER_INTERVAL` | how often the gateway worker runs, default `5s` |
 
 Tests use a fake SDK transport and never call Mercado Pago.

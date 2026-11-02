@@ -20,14 +20,14 @@ const (
 	workBatch       = 20
 	baseBackoff     = 5 * time.Second
 	maxBackoff      = 5 * time.Minute
-	defaultCheckTTL = 48 * time.Hour
+	defaultCheckTTL = 12 * time.Hour // shorter than the orchestrator's 24 h SAGA_PAYMENT_TIMEOUT, so Billing answers first
 )
 
 // GatewayConfig turns on the mercadopago mode of the service.
 type GatewayConfig struct {
 	Gateway         payment.Gateway
 	NotificationURL string        // public HTTPS URL of the webhook; empty means "do not send"
-	CheckoutTTL     time.Duration // lifetime of a checkout (48 h by default)
+	CheckoutTTL     time.Duration // lifetime of a checkout (12 h by default)
 }
 
 // WithGateway enables the gateway mode: RequestPayment records a PENDING payment and the gateway

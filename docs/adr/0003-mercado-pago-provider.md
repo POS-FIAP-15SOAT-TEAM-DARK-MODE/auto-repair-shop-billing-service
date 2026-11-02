@@ -19,7 +19,7 @@ not hold the database transaction of a command. The saga, its message contracts 
 2. **Gateway port.** `payment.Gateway` (create checkout, find/get payments, refund, cancel payment, expire
    checkout) lives in `internal/payment`; `internal/payment/mercadopago` is the only package that imports the
    official SDK. Failures are classified as transient (network, 429, 5xx) or permanent.
-3. **`RequestPayment` only records.** In this mode it creates a `PENDING` payment with `expires_at` (48 h by
+3. **`RequestPayment` only records.** In this mode it creates a `PENDING` payment with `expires_at` (12 h by
    default) and returns. Nothing remote happens inside the command transaction.
 4. **A gateway worker does the remote work**, one pass every few seconds, each step reading its work from the
    database (`WorkKind`), calling the gateway outside a transaction and recording the result in a short one:
@@ -35,9 +35,11 @@ not hold the database transaction of a command. The saga, its message contracts 
    verified first (SDK helper, 5 min tolerance); the body is never trusted for payment data, the payment is
    read from Mercado Pago by `data.id`; other types are acknowledged; failures answer 5xx so it retries.
 7. **Rejection and expiry are final.** A rejected payment expires its checkout and replies `PaymentFailed`.
-   When the 48 h pass, an unpaid checkout becomes `CANCELLED` and an `in_process` payment is cancelled at the
+   When the 12 h pass, an unpaid checkout becomes `CANCELLED` and an `in_process` payment is cancelled at the
    gateway and becomes `REJECTED`; both reply `PaymentFailed`. An approval found first wins. The orchestrator's
-   `PaymentTimeout` is only a backstop and is configured longer than the checkout expiry.
+   `SAGA_PAYMENT_TIMEOUT` is 24 h today, so the checkout lives 12 h by default: Billing answers first and the
+   timeout stays a backstop. With a checkout longer than the timeout, the orchestrator would cancel the order
+   (`SAGA_TIMEOUT`) and send `RefundPayment` before Billing replies.
 8. **Refund.** `RefundPayment` on an approved gateway payment only records `refund_requested_at`;
    `PaymentRefunded` is published after Mercado Pago confirms the refund. On a pending payment it cancels it,
    and the worker expires the checkout and cancels an in-process gateway payment.
