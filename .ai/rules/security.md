@@ -1,32 +1,32 @@
 # Security
 
+This service issues no tokens and stores no credentials. Tokens are issued by the auth lambda (`auto-repair-shop-lambda-auth`); billing only verifies the JWT it receives.
+
 ## JWT
-- All protected endpoints require `Authorization: Bearer <JWT>` — return 401 if missing/invalid.
-- Public endpoints (no auth): `POST /v1/auth/login` and the ping endpoint only.
-- JWT payload must include: `user_id` and `roles` (array). CUSTOMER access to a budget is checked against `user_id` == `budget.customer_user_id`.
-- Auth middleware must not make extra DB calls — rely entirely on the JWT payload.
-- Expiry configurable via `JWT_EXPIRES_IN` env var.
+- Protected endpoints require `Authorization: Bearer <JWT>`. Missing or invalid token → 401 (`internal/app/middleware/auth.go`).
+- Signature: HS256 with `JWT_SECRET`. The code falls back to a placeholder when the variable is empty (`internal/pkg/auth/jwt.go`); production must always set it.
+- Claims used: `user_id` and `roles` (array). The customer check compares `user_id` with `budget.customer_user_id`.
+- The middleware makes no DB call; it relies only on the JWT payload.
+- Public endpoints: `/ping`, `/metrics`, `/swagger/*`, `/swagger.yaml`.
 
 ## RBAC Enforcement
-- Map roles from the JWT payload; reject out-of-scope access with 403.
-- `ADMIN` is exclusive — a user with ADMIN cannot have other roles.
-- Role constants and groups live in `internal/domain/roles.go`.
-- Groups in `internal/pkg/auth/roles.go`: `AttendantRoles`, `MechanicRoles`, `CustomerRoles`, `AttendantAndMechanicRoles`.
+- Each route declares its roles with `middleware.Auth(...)` in `internal/app/routing/routing.go`. A token without any listed role → 403.
+- Role constants: `internal/pkg/auth/roles.go` (`ADMIN`, `ATTENDANT`, `MECHANIC`, `CUSTOMER`). Groups: `AttendantRoles` (ATTENDANT, ADMIN) and `AttendantAndMechanicRoles` (ATTENDANT, MECHANIC, ADMIN).
+- `ADMIN` is listed explicitly in every route that allows it. Nothing in the code makes ADMIN exclusive.
+- A `CUSTOMER` reading a budget only sees its own (`claims.UserId == budget.CustomerUserID`); other budgets answer 404.
 
-## Passwords
-- bcrypt, default cost factor 10 (`bcrypt.DefaultCost`), configurable via `BCRYPT_COST` env var.
-- Payment outcomes are decided only by the payment provider or an authenticated attendant (`/v1/payments/:id/confirm|reject`).
-- Never log or return password hashes.
+## Payments
+- Payment outcomes are decided only by the payment provider (`PAYMENT_MODE`) or by an authenticated attendant (`POST /v1/payments/:id/confirm|reject`).
 
 ## PII — Never Expose or Log
-CPF, CNPJ, passwords, and JWT tokens must never appear in:
+CPF, CNPJ, passwords, JWT tokens and the `Authorization` header must never appear in:
 - HTTP response bodies or headers.
-- Log entries (centralized redaction handled in `internal/pkg/logger/logger.go`).
+- Log entries. The logger redacts sensitive keys (`isSensitiveKey` in `internal/pkg/logger/logger.go`), but do not rely on it: pass explicit safe fields.
 - Error messages returned to clients.
 
-Avoid `zap.Any` for domain/request objects that may contain PII — use explicit safe fields instead.
+Avoid `zap.Any` for domain or request objects that may contain PII.
 
 ## Input Sanitization
-- Validate all user input at handler layer before passing to service.
-- Use domain constructors (`budget.NewBudget`, `payment.Payment.Transition`) — never trust raw strings.
-- Never expose stack traces or internal error details in production responses.
+- Validate all user input at the handler/controller layer before it reaches the service. Path params are read from the context and used as opaque ids.
+- Use domain constructors (`budget.NewBudget`, `payment.Payment.Transition`) for business validation; never trust raw strings in services or domain.
+- Never expose stack traces or internal error details in production responses (`internal/pkg/web`).
