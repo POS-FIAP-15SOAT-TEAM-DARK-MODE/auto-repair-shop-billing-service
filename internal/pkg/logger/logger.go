@@ -12,6 +12,8 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+const defaultServiceName = "billing-service"
+
 type customLogger struct {
 	*zap.Logger
 }
@@ -33,18 +35,30 @@ func initGlobalLogger() {
 }
 
 func initLogger() *zap.Logger {
-	cfg := zap.NewProductionConfig()
-	cfg.EncoderConfig.TimeKey = "timestamp"
-	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	cfg.EncoderConfig.MessageKey = "message"
-	cfg.Level = getLogLevel(env.GetString("LOG_LEVEL", "INFO"))
-
-	l, err := cfg.Build()
+	l, err := productionConfig(getLogLevel(env.GetString("LOG_LEVEL", "INFO"))).Build()
 	if err != nil {
 		panic(err)
 	}
 
 	return l
+}
+
+// productionConfig is the JSON encoder config shared by every log line. The
+// `service` field is set once here so each line says which service emitted it.
+func productionConfig(level zap.AtomicLevel) zap.Config {
+	cfg := zap.NewProductionConfig()
+	cfg.EncoderConfig.TimeKey = "timestamp"
+	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	cfg.EncoderConfig.MessageKey = "message"
+	cfg.InitialFields = map[string]any{"service": serviceName()}
+	cfg.Level = level
+	return cfg
+}
+
+// serviceName reads SERVICE_NAME (set per deployment) and falls back to the
+// name of this service.
+func serviceName() string {
+	return env.GetString("SERVICE_NAME", defaultServiceName)
 }
 
 func getLogLevel(level string) zap.AtomicLevel {
@@ -62,6 +76,14 @@ func Global() *customLogger {
 	return globalLog
 }
 
+// ReplaceGlobal swaps the process-wide logger and returns a function that
+// restores the previous one. It exists so tests can capture log output.
+func ReplaceGlobal(l *zap.Logger) (restore func()) {
+	prev := globalLog
+	globalLog = &customLogger{l}
+	return func() { globalLog = prev }
+}
+
 // Request attaches a per-request logger to ctx, tagging every log line with
 // a request_id. If incomingID is non-empty (e.g. forwarded by an upstream
 // API Gateway or a client-supplied X-Request-Id), it's reused as-is so log
@@ -72,10 +94,13 @@ func Request(ctx context.Context, incomingID string) (context.Context, string) {
 	if reqId == "" {
 		reqId = uuid.New().String()
 	}
-	l := initLogger().With(
-		zap.String("request_id", reqId),
-	)
-	return withContext(ctx, &customLogger{l}), reqId
+	return With(ctx, zap.String("request_id", reqId)), reqId
+}
+
+// With returns a context whose logger carries fields on every line. Consumers
+// use it to add message_id, saga_id and service_order_id to the context.
+func With(ctx context.Context, fields ...zap.Field) context.Context {
+	return withContext(ctx, Of(ctx).With(fields...))
 }
 
 func Of(ctx context.Context) *customLogger {
@@ -91,6 +116,11 @@ func Of(ctx context.Context) *customLogger {
 
 func withContext(ctx context.Context, l *customLogger) context.Context {
 	return context.WithValue(ctx, ctxKey{}, l)
+}
+
+// With derives a logger that adds fields to every line, after redaction.
+func (l *customLogger) With(fields ...zap.Field) *customLogger {
+	return &customLogger{l.Logger.With(sanitizeFields(fields)...)}
 }
 
 func (l *customLogger) Info(msg string, fields ...zap.Field) {
@@ -146,6 +176,8 @@ func isSensitiveKey(key string) bool {
 		key == "senha" ||
 		key == "pwd" ||
 		key == "token" ||
+		key == "jwt" ||
+		key == "access_token" ||
 		key == "authorization" ||
 		key == "cpf" ||
 		key == "cnpj" ||

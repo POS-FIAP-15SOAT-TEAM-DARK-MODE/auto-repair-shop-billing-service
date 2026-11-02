@@ -18,6 +18,7 @@ func Recovery() gin.HandlerFunc {
 			if rec := recover(); rec != nil {
 				stack := debug.Stack()
 				logger.Of(c).Error(fmt.Errorf("panic: %v", rec),
+					zap.String("event", "request.panic"),
 					zap.String("behavior", "[PANIC RECOVERED]"),
 					zap.String("stack", string(stack)),
 				)
