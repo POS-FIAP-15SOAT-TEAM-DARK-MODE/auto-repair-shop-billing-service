@@ -14,6 +14,7 @@ import (
 
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/logger"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/metrics"
 )
 
 const (
@@ -101,6 +102,9 @@ func (s *Service) ApplyGatewayPayment(ctx context.Context, gp payment.GatewayPay
 		result, err = s.applyLocked(ctx, tx, pay, gp, target)
 		return err
 	})
+	if err == nil && result == ResultApplied {
+		metrics.PaymentStatusChanges.WithLabelValues(string(target), "gateway").Inc()
+	}
 	return result, err
 }
 
@@ -110,12 +114,15 @@ func (s *Service) applyLocked(ctx context.Context, tx *sql.Tx, pay *payment.Paym
 
 	switch {
 	case target == payment.StatusApproved && pay.Status == payment.StatusApproved && pay.GatewayPaymentID != "" && pay.GatewayPaymentID != gp.ID:
+		metrics.PaymentsUnsettled.WithLabelValues("extra_approval").Inc()
 		logger.Of(ctx).Error(errors.New("extra approved gateway payment: needs a manual refund"), fields(zap.String("settled_by", pay.GatewayPaymentID))...)
 		return ResultIgnored, nil
 	case target == payment.StatusApproved && (pay.Status == payment.StatusCancelled || pay.Status == payment.StatusRejected):
+		metrics.PaymentsUnsettled.WithLabelValues("late_approval").Inc()
 		logger.Of(ctx).Error(errors.New("late approval on a closed payment: needs a manual refund"), fields(zap.String("status", string(pay.Status)))...)
 		return ResultIgnored, nil
 	case target == payment.StatusApproved && !gp.Amount.Equal(pay.Amount):
+		metrics.PaymentsUnsettled.WithLabelValues("amount_mismatch").Inc()
 		logger.Of(ctx).Error(errors.New("approved gateway payment with another amount, not settled"), fields(zap.String("expected", formatMoney(pay.Amount)), zap.String("got", formatMoney(gp.Amount)))...)
 		return ResultIgnored, nil
 	case target == pay.Status:
@@ -213,11 +220,34 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 			if err != nil {
 				s.retry.fail(key, now)
 				s.logStepError(ctx, step.kind, p, err)
+				if !errors.Is(err, errNotYet) {
+					kind := "permanent"
+					if payment.IsTransient(err) {
+						kind = "transient"
+					}
+					metrics.GatewayWorkerErrors.WithLabelValues(string(step.kind), kind).Inc()
+				}
 				continue
 			}
 			s.retry.clear(key)
 		}
 	}
+	s.publishPendingStats(ctx, now)
+}
+
+// publishPendingStats refreshes the gauges of the Mercado Pago payments waiting to be settled.
+func (s *Service) publishPendingStats(ctx context.Context, now time.Time) {
+	stats, err := s.payments.PendingStats(ctx, s.db)
+	if err != nil {
+		logger.Of(ctx).Error(fmt.Errorf("pending stats: %w", err), zap.String("component", "gateway-worker"))
+		return
+	}
+	metrics.PaymentsPending.Set(float64(stats.Count))
+	age := 0.0
+	if stats.Oldest != nil {
+		age = max(now.Sub(*stats.Oldest).Seconds(), 0)
+	}
+	metrics.PaymentsPendingOldestAge.Set(age)
 }
 
 func (s *Service) logStepError(ctx context.Context, kind payment.WorkKind, p *payment.Payment, err error) {
@@ -440,7 +470,8 @@ func (s *Service) sweepUnknownPayments(ctx context.Context, p *payment.Payment) 
 // settle moves a PENDING payment to a final status and answers the saga, unless it is no longer
 // PENDING or guard says no.
 func (s *Service) settle(ctx context.Context, id string, to payment.Status, guard func(*payment.Payment) bool) error {
-	return s.inTx(ctx, func(tx *sql.Tx) error {
+	changed := false
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		pay, err := s.payments.FindByIDForUpdate(ctx, tx, id)
 		if err != nil {
 			return err
@@ -451,8 +482,13 @@ func (s *Service) settle(ctx context.Context, id string, to payment.Status, guar
 		if err := s.setStatus(ctx, tx, pay, to); err != nil {
 			return err
 		}
+		changed = true
 		return s.publishOutcome(ctx, tx, pay, to)
 	})
+	if err == nil && changed {
+		metrics.PaymentStatusChanges.WithLabelValues(string(to), "worker").Inc()
+	}
+	return err
 }
 
 // inTx runs fn in a transaction that commits when fn returns nil.

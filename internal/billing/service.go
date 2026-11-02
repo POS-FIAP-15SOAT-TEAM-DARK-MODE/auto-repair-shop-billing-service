@@ -13,6 +13,7 @@ import (
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/db"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/logger"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/messaging"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/metrics"
 	"go.uber.org/zap"
 )
 
@@ -266,7 +267,11 @@ func (s *Service) decide(ctx context.Context, paymentID, requestID string, to pa
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	metrics.PaymentStatusChanges.WithLabelValues(string(to), "manual").Inc()
+	return nil
 }
 
 // GetBudget returns the GENERATED budget of a service order.

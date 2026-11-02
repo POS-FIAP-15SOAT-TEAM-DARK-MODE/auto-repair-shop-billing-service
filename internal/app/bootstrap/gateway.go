@@ -37,7 +37,7 @@ func gatewayMode(service *billing.Service) (*billing.Controller, []app.Server, e
 		logger.Global().Warn("MERCADOPAGO_WEBHOOK_SECRET is empty: every webhook will be rejected; payments settle through the reconciliation worker only")
 	}
 	service.WithGateway(billing.GatewayConfig{
-		Gateway:         gateway,
+		Gateway:         mercadopago.Instrument(gateway),
 		NotificationURL: env.GetString("MERCADOPAGO_NOTIFICATION_URL", ""),
 		CheckoutTTL:     env.GetTimeDuration("MERCADOPAGO_CHECKOUT_TTL", 12*time.Hour),
 	})

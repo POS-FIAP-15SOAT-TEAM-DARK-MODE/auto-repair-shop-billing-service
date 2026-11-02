@@ -14,3 +14,12 @@ Log messages in use (keep them stable; dashboards and Loki queries depend on the
 - component `outbox-relay` / `sqs-consumer` — errors of the background loops (message stays unpublished / in the queue)
 
 Redaction: never log customer documents, passwords or JWT tokens. Prefer explicit fields (`zap.String("service_order_id", id)`).
+
+## Metrics (`GET /metrics`, Prometheus)
+- `http_request_duration_seconds{method,route,status}` — API latency.
+- `payment_status_changes_total{to,source}` — payments that changed status; `source` is `gateway` (webhook, reconciliation, refund), `worker` (expiry, refused checkout) or `manual` (attendant).
+- `gateway_requests_total{op,outcome}` and `gateway_request_duration_seconds{op}` — calls to Mercado Pago (`create_checkout`, `find_payments`, `get_payment`, `refund`, `cancel_payment`, `expire_checkout`; outcome `ok`, `transient`, `permanent`). Watch `permanent` and a rising `transient` (a rejected token shows up here).
+- `gateway_worker_errors_total{step,kind}` — failed worker steps (`CREATE_CHECKOUT`, `RECONCILE`, `EXPIRE`, `REFUND`, `CLOSE_CHECKOUT`); waiting for the gateway is not an error.
+- `payments_pending` and `payments_pending_oldest_age_seconds` — Mercado Pago payments waiting; refreshed every worker pass. An age above the checkout lifetime means expiry is stuck.
+- `payments_unsettled_total{reason}` — money Billing did not settle (`extra_approval`, `late_approval`, `amount_mismatch`). **Alert on any increase**: it needs a manual refund or review.
+- Labels never carry ids (no payment, order or gateway ids), so cardinality stays fixed.

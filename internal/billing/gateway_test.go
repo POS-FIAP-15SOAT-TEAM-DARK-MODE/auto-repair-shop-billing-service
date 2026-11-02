@@ -12,6 +12,8 @@ import (
 
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/budget"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // fakeGateway is a payment.Gateway that records its calls and answers from fields the tests set.
@@ -851,4 +853,119 @@ func TestGateway_PaymentsInBackoffGoToTheBackOfTheLine(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, 1, g.gw.finds)
+}
+
+// ---- metrics ----
+
+func statusChanges(to, source string) float64 {
+	return testutil.ToFloat64(metrics.PaymentStatusChanges.WithLabelValues(to, source))
+}
+
+func unsettled(reason string) float64 {
+	return testutil.ToFloat64(metrics.PaymentsUnsettled.WithLabelValues(reason))
+}
+
+func TestGateway_MetricsCountStatusChangesBySource(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	before := statusChanges("APPROVED", "gateway")
+	g.tx(1)
+	_, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "approved", "221"))
+	require.NoError(t, err)
+	assert.Equal(t, before+1, statusChanges("APPROVED", "gateway"))
+
+	g.tx(0)
+	_, err = g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "approved", "221")) // duplicate: not a change
+	require.NoError(t, err)
+	assert.Equal(t, before+1, statusChanges("APPROVED", "gateway"))
+	g.assertDB()
+}
+
+func TestGateway_MetricsCountWorkerSettlementsAndManualDecisions(t *testing.T) {
+	g := newGatewayHarness(t)
+	p := g.seedGatewayPayment(func(p *payment.Payment) { exp := t0.Add(-time.Hour); p.ExpiresAt = &exp })
+	workerBefore := statusChanges("CANCELLED", "worker")
+	g.tx(1)
+	require.NoError(t, g.svc.expire(context.Background(), p))
+	assert.Equal(t, workerBefore+1, statusChanges("CANCELLED", "worker"))
+
+	manualBefore := statusChanges("APPROVED", "manual")
+	require.NoError(t, g.payments.Create(context.Background(), nil, &payment.Payment{ID: "pay-2", BudgetID: "b", ServiceOrderID: "SO-2", SagaID: "saga-2",
+		Amount: decimal.RequireFromString("10"), Status: payment.StatusPending, Provider: payment.ProviderName}))
+	g.tx(1)
+	require.NoError(t, g.svc.Confirm(context.Background(), "pay-2", "req-1"))
+	assert.Equal(t, manualBefore+1, statusChanges("APPROVED", "manual"))
+	g.assertDB()
+}
+
+func TestGateway_MetricsFlagMoneyThatIsNotSettled(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	mismatch, extra, late := unsettled("amount_mismatch"), unsettled("extra_approval"), unsettled("late_approval")
+
+	g.tx(0)
+	_, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "approved", "200"))
+	require.NoError(t, err)
+	assert.Equal(t, mismatch+1, unsettled("amount_mismatch"))
+
+	g.tx(1)
+	_, err = g.svc.ApplyGatewayPayment(context.Background(), gp("1002", "approved", "221"))
+	require.NoError(t, err)
+	g.tx(0)
+	_, err = g.svc.ApplyGatewayPayment(context.Background(), gp("1003", "approved", "221")) // a second approval
+	require.NoError(t, err)
+	assert.Equal(t, extra+1, unsettled("extra_approval"))
+
+	other := g.seedGatewayPayment(func(p *payment.Payment) {
+		p.ID = "pay-3"
+		p.ServiceOrderID = "SO-3"
+		withCheckout(p)
+		p.Status = payment.StatusCancelled
+	})
+	g.tx(0)
+	_, err = g.svc.ApplyGatewayPayment(context.Background(), payment.GatewayPayment{ID: "1004", Status: "approved", ExternalReference: other.ID, Amount: decimal.RequireFromString("221")})
+	require.NoError(t, err)
+	assert.Equal(t, late+1, unsettled("late_approval"))
+	g.assertDB()
+}
+
+func TestGateway_MetricsCountWorkerErrorsByKind(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	transientBefore := testutil.ToFloat64(metrics.GatewayWorkerErrors.WithLabelValues("RECONCILE", "transient"))
+	g.gw.findErr = transient
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, transientBefore+1, testutil.ToFloat64(metrics.GatewayWorkerErrors.WithLabelValues("RECONCILE", "transient")))
+
+	// a refund that is only waiting for the gateway is not an error
+	g2 := newGatewayHarness(t)
+	g2.seedGatewayPayment(func(p *payment.Payment) {
+		withCheckout(p)
+		p.Status, p.GatewayPaymentID = payment.StatusApproved, "1001"
+		requested := t0
+		p.RefundRequestedAt = &requested
+	})
+	g2.gw.byID["1001"] = gp("1001", "approved", "221")
+	g2.tx(0)
+	waiting := testutil.ToFloat64(metrics.GatewayWorkerErrors.WithLabelValues("REFUND", "transient"))
+	g2.svc.ProcessGatewayWork(context.Background())
+	assert.Equal(t, waiting, testutil.ToFloat64(metrics.GatewayWorkerErrors.WithLabelValues("REFUND", "transient")))
+}
+
+func TestGateway_MetricsPublishThePendingBacklog(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) { withCheckout(p); p.CreatedAt = t0.Add(-10 * time.Minute) })
+	g.gw.found = nil
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(metrics.PaymentsPending))
+	assert.InDelta(t, 600, testutil.ToFloat64(metrics.PaymentsPendingOldestAge), 1)
+
+	empty := newGatewayHarness(t)
+	empty.svc.ProcessGatewayWork(context.Background())
+	assert.Equal(t, 0.0, testutil.ToFloat64(metrics.PaymentsPending))
+	assert.Equal(t, 0.0, testutil.ToFloat64(metrics.PaymentsPendingOldestAge), "no pending payment, no age")
 }

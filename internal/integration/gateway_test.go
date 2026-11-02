@@ -162,7 +162,7 @@ func (e *gwEnv) outboxTypes() []string {
 	e.t.Helper()
 	rows, err := e.db.QueryContext(e.ctx, "SELECT type FROM outbox ORDER BY id")
 	require.NoError(e.t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var s string
@@ -356,4 +356,20 @@ func TestGateway_ListWorkServesTheLeastRecentlyCheckedFirstOnPostgres(t *testing
 
 	later := now.Add(payment.ReconcileEvery + time.Second)
 	assert.Equal(t, []string{"pay-C", "pay-A"}, ids(later), "never checked first, then the oldest check")
+}
+
+func TestGateway_PendingStatsOnPostgres(t *testing.T) {
+	e := setupGateway(t)
+	repo := paymentRepo.NewPostgres()
+	none, err := repo.PendingStats(e.ctx, e.db)
+	require.NoError(t, err)
+	assert.Zero(t, none.Count)
+	assert.Nil(t, none.Oldest)
+
+	e.requestPayment()
+	got, err := repo.PendingStats(e.ctx, e.db)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.Count)
+	require.NotNil(t, got.Oldest)
+	assert.WithinDuration(t, time.Now(), *got.Oldest, time.Minute)
 }

@@ -116,3 +116,19 @@ func matchesWork(p *payment.Payment, kind payment.WorkKind, now time.Time) bool 
 	}
 	return false
 }
+
+// PendingStats mirrors the query of the Postgres repository.
+func (r *InMemory) PendingStats(_ context.Context, _ db.Executor) (payment.PendingStats, error) {
+	var out payment.PendingStats
+	for _, p := range r.items {
+		if p.Provider != payment.ProviderMercadoPago || p.Status != payment.StatusPending {
+			continue
+		}
+		out.Count++
+		if out.Oldest == nil || p.CreatedAt.Before(*out.Oldest) {
+			created := p.CreatedAt
+			out.Oldest = &created
+		}
+	}
+	return out, nil
+}

@@ -228,3 +228,43 @@ func TestInMemory_ListWorkRotatesAndWaitsBetweenLooks(t *testing.T) {
 	now = now.Add(payment.ReconcileEvery + time.Second)
 	assert.Equal(t, []string{"c", "a"}, ids(), "never checked first, then the oldest check")
 }
+
+func TestPostgres_PendingStats(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer func() { _ = db.Close() }()
+	oldest := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("FROM payment WHERE provider = 'mercadopago' AND status = 'PENDING'").
+		WillReturnRows(sqlmock.NewRows([]string{"count", "min"}).AddRow(3, oldest))
+	got, err := NewPostgres().PendingStats(context.Background(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 3, got.Count)
+	require.NotNil(t, got.Oldest)
+	assert.True(t, got.Oldest.Equal(oldest))
+
+	mock.ExpectQuery("FROM payment").WillReturnRows(sqlmock.NewRows([]string{"count", "min"}).AddRow(0, nil))
+	got, err = NewPostgres().PendingStats(context.Background(), db)
+	require.NoError(t, err)
+	assert.Zero(t, got.Count)
+	assert.Nil(t, got.Oldest)
+
+	mock.ExpectQuery("FROM payment").WillReturnError(errors.New("boom"))
+	_, err = NewPostgres().PendingStats(context.Background(), db)
+	assert.EqualError(t, err, "boom")
+}
+
+func TestInMemory_PendingStats(t *testing.T) {
+	repo := NewInMemory()
+	early, late := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC), time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	for i, p := range []*payment.Payment{
+		{ID: "a", Provider: payment.ProviderMercadoPago, Status: payment.StatusPending, CreatedAt: late},
+		{ID: "b", Provider: payment.ProviderMercadoPago, Status: payment.StatusPending, CreatedAt: early},
+		{ID: "c", Provider: payment.ProviderMercadoPago, Status: payment.StatusApproved, CreatedAt: early.Add(-time.Hour)},
+		{ID: "d", Provider: payment.ProviderName, Status: payment.StatusPending, CreatedAt: early.Add(-2 * time.Hour)},
+	} {
+		require.NoError(t, repo.Create(context.Background(), nil, p), i)
+	}
+	got, err := repo.PendingStats(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Count, "only the Mercado Pago payments that are pending")
+	assert.True(t, got.Oldest.Equal(early))
+}

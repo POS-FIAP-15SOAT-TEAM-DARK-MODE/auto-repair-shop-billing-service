@@ -113,6 +113,14 @@ type Repository interface {
 	// first (never looked at, then the oldest check), so a failing payment cannot starve the others. now is
 	// used by WorkExpire and WorkReconcile (which waits ReconcileEvery between two looks at a payment).
 	ListWork(ctx context.Context, ex db.Executor, kind WorkKind, now time.Time, limit int) ([]*Payment, error)
+	// PendingStats describes the Mercado Pago payments in PENDING.
+	PendingStats(ctx context.Context, ex db.Executor) (PendingStats, error)
 	// MarkChecked records that the gateway worker looked at the payment at the given time.
 	MarkChecked(ctx context.Context, ex db.Executor, id string, at time.Time) error
+}
+
+// PendingStats is what the worker publishes about the Mercado Pago payments waiting to be settled.
+type PendingStats struct {
+	Count  int
+	Oldest *time.Time // creation time of the oldest one; nil when there is none
 }
