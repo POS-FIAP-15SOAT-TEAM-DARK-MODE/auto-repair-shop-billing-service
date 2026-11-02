@@ -31,7 +31,7 @@ func Error(err error) (int, errorResponse) {
 // getHTTPStatus determines the HTTP status code for a given error.
 func getHTTPStatus(err error) int {
 	switch {
-	case isBadRequestError(err), IsJoined(err):
+	case isBadRequestError(err):
 		return http.StatusBadRequest
 	case isNotFoundError(err):
 		return http.StatusNotFound
@@ -46,35 +46,41 @@ func getHTTPStatus(err error) int {
 	}
 }
 
-func IsJoined(err error) bool {
-	type unwrapper interface {
-		Unwrap() []error
-	}
-
-	var uw unwrapper
-	return errors.As(err, &uw)
-}
+// Generic messages returned to clients for infrastructure failures. The real cause
+// is logged by the transport adapters (see routing), never sent in the body.
+const (
+	msgInternal    = "internal server error"
+	msgConflict    = "conflict"
+	msgInvalidData = "invalid data"
+	msgNotFound    = "not found"
+)
 
 // buildErrorMessages formats the error messages based on status code.
+// Only domain sentinels reach the body; any other error is answered generically.
 func buildErrorMessages(err error, status int) ([]string, string) {
 	switch status {
 	case http.StatusBadRequest:
 		return unwrapAll(err), ""
 	case http.StatusNotFound:
-		return nil, err.Error()
-	case http.StatusConflict, http.StatusUnprocessableEntity, http.StatusInternalServerError:
-		root := err
-		for {
-			unwrapped := errors.Unwrap(root)
-			if unwrapped == nil {
-				break
-			}
-			root = unwrapped
-		}
-		return nil, root.Error()
+		return nil, domainMessage(err, msgNotFound, budget.ErrNotFound, payment.ErrNotFound)
+	case http.StatusConflict:
+		return nil, domainMessage(err, msgConflict, payment.ErrInvalidTransition)
+	case http.StatusUnprocessableEntity:
+		return nil, msgInvalidData
 	default:
-		return nil, "Internal Server Error"
+		return nil, msgInternal
 	}
+}
+
+// domainMessage returns the message of the first domain sentinel that err matches,
+// or fallback when none matches (infrastructure errors).
+func domainMessage(err error, fallback string, sentinels ...error) string {
+	for _, s := range sentinels {
+		if errors.Is(err, s) {
+			return s.Error()
+		}
+	}
+	return fallback
 }
 
 func isBadRequestError(err error) bool {

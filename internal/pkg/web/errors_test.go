@@ -21,12 +21,12 @@ func TestError_StatusMapping(t *testing.T) {
 		msg    string
 	}{
 		{"budget not found", budget.ErrNotFound, http.StatusNotFound, "budget not found"},
-		{"payment not found", fmt.Errorf("wrap: %w", payment.ErrNotFound), http.StatusNotFound, "wrap: payment not found"},
+		{"payment not found", fmt.Errorf("wrap: %w", payment.ErrNotFound), http.StatusNotFound, "payment not found"},
 		{"invalid transition", fmt.Errorf("%w: A -> B", payment.ErrInvalidTransition), http.StatusConflict, payment.ErrInvalidTransition.Error()},
-		{"data conflict", app.ErrDataConflict, http.StatusConflict, app.ErrDataConflict.Error()},
-		{"data violation", app.ErrDataViolation, http.StatusUnprocessableEntity, app.ErrDataViolation.Error()},
+		{"data conflict", app.ErrDataConflict, http.StatusConflict, "conflict"},
+		{"data violation", app.ErrDataViolation, http.StatusUnprocessableEntity, "invalid data"},
 		{"json syntax", jsonv2.ErrJSONSyntax, http.StatusBadRequest, ""},
-		{"unknown", errors.New("boom"), http.StatusInternalServerError, "boom"},
+		{"unknown", errors.New("boom"), http.StatusInternalServerError, "internal server error"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -36,6 +36,38 @@ func TestError_StatusMapping(t *testing.T) {
 			if tc.msg != "" {
 				assert.Contains(t, body.Error+fmt.Sprint(body.Errors), tc.msg)
 			}
+		})
+	}
+}
+
+// rootCause mimics a Postgres driver error that must never reach a response body.
+var rootCause = errors.New(`pq: duplicate key value violates unique constraint "payment_pkey" (value 42)`)
+
+func TestError_InfrastructureCauseNeverInBody(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		status  int
+		message string
+	}{
+		{"500 unknown wrap", fmt.Errorf("save: %w", rootCause), http.StatusInternalServerError, "internal server error"},
+		{"500 joined", errors.Join(errors.New("a"), rootCause), http.StatusInternalServerError, "internal server error"},
+		{"409 infra wrap", fmt.Errorf("%w: %w", app.ErrDataConflict, rootCause), http.StatusConflict, "conflict"},
+		{"409 infra generic", fmt.Errorf("%w: %w", app.ErrInfraConflict, rootCause), http.StatusConflict, "conflict"},
+		{"422 infra wrap", fmt.Errorf("%w: %w", app.ErrDataViolation, rootCause), http.StatusUnprocessableEntity, "invalid data"},
+		{"404 wrap with cause", fmt.Errorf("%w: %w", budget.ErrNotFound, rootCause), http.StatusNotFound, "budget not found"},
+		{"409 domain keeps sentinel message", fmt.Errorf("%w: %w", payment.ErrInvalidTransition, rootCause), http.StatusConflict, payment.ErrInvalidTransition.Error()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := Error(tc.err)
+			assert.Equal(t, tc.status, status)
+			assert.Equal(t, status, body.StatusCode)
+			assert.Equal(t, tc.message, body.Error)
+			assert.Empty(t, body.Errors)
+			assert.NotContains(t, body.Error, "pq:")
+			assert.NotContains(t, body.Error, "duplicate key")
+			assert.NotContains(t, body.Error, "payment_pkey")
 		})
 	}
 }
