@@ -11,8 +11,17 @@ var (
 		},
 		[]string{"method", "route", "status"},
 	)
+
+	// OutboxPending counts outbox rows not yet published to SNS. It keeps growing
+	// while the relay cannot reach SNS, which makes it the first signal of a stuck saga step.
+	OutboxPending = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "outbox_pending",
+			Help: "Outbox rows waiting to be published to the events topic.",
+		},
+	)
 )
 
 func init() {
-	prometheus.MustRegister(HTTPRequestDuration)
+	prometheus.MustRegister(HTTPRequestDuration, OutboxPending)
 }

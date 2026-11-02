@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 // ErrInvalidEnvelope is returned when a message body is not a valid envelope.
@@ -52,4 +53,20 @@ func Decode(body []byte) (Envelope, error) {
 		return Envelope{}, ErrInvalidEnvelope
 	}
 	return env, nil
+}
+
+// logFields are the identifiers every log line about a message carries.
+// Ids that the message does not have (e.g. saga_id on a plain event) are left out.
+func (e Envelope) logFields() []zap.Field {
+	fields := []zap.Field{zap.String("message_id", e.MessageID), zap.String("type", e.Type)}
+	if e.RequestID != "" {
+		fields = append(fields, zap.String("request_id", e.RequestID))
+	}
+	if e.SagaID != "" {
+		fields = append(fields, zap.String("saga_id", e.SagaID))
+	}
+	if e.ServiceOrderID != "" {
+		fields = append(fields, zap.String("service_order_id", e.ServiceOrderID))
+	}
+	return fields
 }
