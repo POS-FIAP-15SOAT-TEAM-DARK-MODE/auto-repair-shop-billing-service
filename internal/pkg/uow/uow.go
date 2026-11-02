@@ -5,7 +5,6 @@ import (
 	"fmt"
 )
 
-//go:generate go run github.com/vektra/mockery/v2@latest --name=Executor --with-expecter
 type Executor interface {
 	Execute(ctx context.Context, steps ...Step) error
 }

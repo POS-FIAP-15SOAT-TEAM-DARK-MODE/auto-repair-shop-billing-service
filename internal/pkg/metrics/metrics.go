@@ -12,6 +12,15 @@ var (
 		[]string{"method", "route", "status"},
 	)
 
+	// OutboxPending counts outbox rows not yet published to SNS. It keeps growing
+	// while the relay cannot reach SNS, which makes it the first signal of a stuck saga step.
+	OutboxPending = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "outbox_pending",
+			Help: "Outbox rows waiting to be published to the events topic.",
+		},
+	)
+
 	// PaymentStatusChanges counts payments that changed status, by the new status and who decided it:
 	// "gateway" (webhook, reconciliation, refund confirmation), "worker" (expiry, refused checkout)
 	// or "manual" (attendant).
@@ -75,6 +84,6 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(HTTPRequestDuration, PaymentStatusChanges, GatewayRequests, GatewayRequestDuration,
+	prometheus.MustRegister(HTTPRequestDuration, OutboxPending, PaymentStatusChanges, GatewayRequests, GatewayRequestDuration,
 		GatewayWorkerErrors, PaymentsPending, PaymentsPendingOldestAge, PaymentsUnsettled)
 }

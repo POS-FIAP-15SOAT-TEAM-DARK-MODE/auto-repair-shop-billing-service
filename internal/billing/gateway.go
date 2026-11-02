@@ -53,7 +53,7 @@ func (s *Service) HandleGatewayNotification(ctx context.Context, gatewayPaymentI
 	if err != nil {
 		if payment.IsNotFound(err) {
 			// the gateway does not know the payment: a retry cannot help
-			logger.Of(ctx).Warn("gateway payment of a notification not found", zap.String("gateway_payment_id", gatewayPaymentID), zap.Error(err))
+			logger.Of(ctx).Warn("gateway payment of a notification not found", zap.String("event", "gateway.payment_not_applied"), zap.String("reason", "not_found"), zap.String("gateway_payment_id", gatewayPaymentID), zap.Error(err))
 			return ResultUnknown, nil
 		}
 		return ResultIgnored, err
@@ -88,7 +88,7 @@ func (s *Service) ApplyGatewayPayment(ctx context.Context, gp payment.GatewayPay
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		pay, err := s.payments.FindByIDForUpdate(ctx, tx, gp.ExternalReference)
 		if errors.Is(err, payment.ErrNotFound) {
-			logger.Of(ctx).Warn("gateway payment of an unknown payment", zap.String("gateway_payment_id", gp.ID))
+			logger.Of(ctx).Warn("gateway payment of an unknown payment", zap.String("event", "gateway.payment_not_applied"), zap.String("reason", "unknown_payment"), zap.String("gateway_payment_id", gp.ID))
 			result = ResultUnknown
 			return nil
 		}
@@ -96,7 +96,7 @@ func (s *Service) ApplyGatewayPayment(ctx context.Context, gp payment.GatewayPay
 			return err
 		}
 		if !mapped {
-			logger.Of(ctx).Warn("gateway status not mapped, ignoring", zap.String("payment_id", pay.ID), zap.String("gateway_status", gp.Status))
+			logger.Of(ctx).Warn("gateway status not mapped, ignoring", zap.String("event", "gateway.payment_not_applied"), zap.String("reason", "status_not_mapped"), zap.String("payment_id", pay.ID), zap.String("saga_id", pay.SagaID), zap.String("service_order_id", pay.ServiceOrderID), zap.String("gateway_status", gp.Status))
 			return nil
 		}
 		result, err = s.applyLocked(ctx, tx, pay, gp, target)
@@ -115,15 +115,15 @@ func (s *Service) applyLocked(ctx context.Context, tx *sql.Tx, pay *payment.Paym
 	switch {
 	case target == payment.StatusApproved && pay.Status == payment.StatusApproved && pay.GatewayPaymentID != "" && pay.GatewayPaymentID != gp.ID:
 		metrics.PaymentsUnsettled.WithLabelValues("extra_approval").Inc()
-		logger.Of(ctx).Error(errors.New("extra approved gateway payment: needs a manual refund"), fields(zap.String("settled_by", pay.GatewayPaymentID))...)
+		logger.Of(ctx).Error(errors.New("extra approved gateway payment: needs a manual refund"), fields(zap.String("event", "payment.unsettled"), zap.String("reason", "extra_approval"), zap.String("settled_by", pay.GatewayPaymentID))...)
 		return ResultIgnored, nil
 	case target == payment.StatusApproved && (pay.Status == payment.StatusCancelled || pay.Status == payment.StatusRejected):
 		metrics.PaymentsUnsettled.WithLabelValues("late_approval").Inc()
-		logger.Of(ctx).Error(errors.New("late approval on a closed payment: needs a manual refund"), fields(zap.String("status", string(pay.Status)))...)
+		logger.Of(ctx).Error(errors.New("late approval on a closed payment: needs a manual refund"), fields(zap.String("event", "payment.unsettled"), zap.String("reason", "late_approval"), zap.String("status", string(pay.Status)))...)
 		return ResultIgnored, nil
 	case target == payment.StatusApproved && !gp.Amount.Equal(pay.Amount):
 		metrics.PaymentsUnsettled.WithLabelValues("amount_mismatch").Inc()
-		logger.Of(ctx).Error(errors.New("approved gateway payment with another amount, not settled"), fields(zap.String("expected", formatMoney(pay.Amount)), zap.String("got", formatMoney(gp.Amount)))...)
+		logger.Of(ctx).Error(errors.New("approved gateway payment with another amount, not settled"), fields(zap.String("event", "payment.unsettled"), zap.String("reason", "amount_mismatch"), zap.String("expected", formatMoney(pay.Amount)), zap.String("got", formatMoney(gp.Amount)))...)
 		return ResultIgnored, nil
 	case target == pay.Status:
 		if pay.GatewayPaymentID == "" && gp.ID != "" {
@@ -137,7 +137,7 @@ func (s *Service) applyLocked(ctx context.Context, tx *sql.Tx, pay *payment.Paym
 
 	previous := pay.Status
 	if err := pay.Transition(target); err != nil {
-		logger.Of(ctx).Warn("gateway status ignored: invalid transition", fields(zap.String("from", string(previous)), zap.String("to", string(target)))...)
+		logger.Of(ctx).Warn("gateway status ignored: invalid transition", fields(zap.String("event", "gateway.payment_not_applied"), zap.String("reason", "invalid_transition"), zap.String("from", string(previous)), zap.String("to", string(target)))...)
 		return ResultIgnored, nil
 	}
 	if pay.GatewayPaymentID == "" || target == payment.StatusApproved {
@@ -149,7 +149,7 @@ func (s *Service) applyLocked(ctx context.Context, tx *sql.Tx, pay *payment.Paym
 	if err := s.publishOutcome(ctx, tx, pay, target); err != nil {
 		return ResultIgnored, err
 	}
-	logger.Of(ctx).Info("payment status applied from the gateway", fields(zap.String("from", string(previous)), zap.String("to", string(target)))...)
+	logger.Of(ctx).Info("payment status applied from the gateway", fields(zap.String("event", "payment.status_applied"), zap.String("from", string(previous)), zap.String("to", string(target)))...)
 	return ResultApplied, nil
 }
 
@@ -197,7 +197,7 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 	for _, step := range steps {
 		list, err := s.payments.ListWork(ctx, s.db, step.kind, now, workBatch)
 		if err != nil {
-			logger.Of(ctx).Error(fmt.Errorf("list %s: %w", step.kind, err), zap.String("component", "gateway-worker"))
+			logger.Of(ctx).Error(fmt.Errorf("list %s: %w", step.kind, err), zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", string(step.kind)))
 			continue
 		}
 		for _, p := range list {
@@ -205,7 +205,7 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 			if !s.retry.ready(key, now) {
 				// a payment waiting for its backoff goes to the back of the line, or it would keep a slot of every batch
 				if err := s.payments.MarkChecked(ctx, s.db, p.ID, now); err != nil {
-					logger.Of(ctx).Error(err, zap.String("component", "gateway-worker"), zap.String("payment_id", p.ID))
+					logger.Of(ctx).Error(err, zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", string(step.kind)), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID))
 				}
 				continue
 			}
@@ -214,7 +214,7 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 			// just opened is not stamped: its first reconciliation should not wait.
 			if step.kind != payment.WorkCreateCheckout || err != nil {
 				if markErr := s.payments.MarkChecked(ctx, s.db, p.ID, now); markErr != nil {
-					logger.Of(ctx).Error(markErr, zap.String("component", "gateway-worker"), zap.String("payment_id", p.ID))
+					logger.Of(ctx).Error(markErr, zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", string(step.kind)), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID))
 				}
 			}
 			if err != nil {
@@ -239,7 +239,7 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 func (s *Service) publishPendingStats(ctx context.Context, now time.Time) {
 	stats, err := s.payments.PendingStats(ctx, s.db)
 	if err != nil {
-		logger.Of(ctx).Error(fmt.Errorf("pending stats: %w", err), zap.String("component", "gateway-worker"))
+		logger.Of(ctx).Error(fmt.Errorf("pending stats: %w", err), zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", "PENDING_STATS"))
 		return
 	}
 	metrics.PaymentsPending.Set(float64(stats.Count))
@@ -253,10 +253,10 @@ func (s *Service) publishPendingStats(ctx context.Context, now time.Time) {
 func (s *Service) logStepError(ctx context.Context, kind payment.WorkKind, p *payment.Payment, err error) {
 	fields := []zap.Field{zap.String("component", "gateway-worker"), zap.String("step", string(kind)), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID), zap.String("service_order_id", p.ServiceOrderID)}
 	if errors.Is(err, errNotYet) {
-		logger.Of(ctx).Debug("waiting for the gateway", fields...)
+		logger.Of(ctx).Debug("waiting for the gateway", append(fields, zap.String("event", "gateway.worker_waiting"))...)
 		return
 	}
-	logger.Of(ctx).Error(err, append(fields, zap.Bool("transient", payment.IsTransient(err)))...)
+	logger.Of(ctx).Error(err, append(fields, zap.String("event", "gateway.worker_step_failed"), zap.Bool("transient", payment.IsTransient(err)))...)
 }
 
 // RunGatewayWorker calls ProcessGatewayWork every interval until ctx is cancelled.
@@ -291,7 +291,7 @@ func (s *Service) createCheckout(ctx context.Context, p *payment.Payment) error 
 		if payment.IsTransient(err) {
 			return err
 		}
-		logger.Of(ctx).Error(err, zap.String("payment_id", p.ID), zap.String("component", "gateway-worker"))
+		logger.Of(ctx).Error(err, zap.String("event", "gateway.worker_step_failed"), zap.String("step", "CREATE_CHECKOUT"), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID), zap.String("component", "gateway-worker"), zap.Bool("transient", false))
 		return s.settle(ctx, p.ID, payment.StatusRejected, func(pay *payment.Payment) bool { return pay.ExternalID == "" })
 	}
 	return s.inTx(ctx, func(tx *sql.Tx) error {
@@ -448,7 +448,7 @@ func (s *Service) sweepUnknownPayments(ctx context.Context, p *payment.Payment) 
 			return err
 		}
 		// the search is refused for good: say so and still close the checkout
-		logger.Of(ctx).Error(err, zap.String("component", "gateway-worker"), zap.String("payment_id", p.ID))
+		logger.Of(ctx).Error(err, zap.String("event", "gateway.worker_step_failed"), zap.String("component", "gateway-worker"), zap.String("step", "CLOSE_CHECKOUT"), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID), zap.Bool("transient", false))
 		return nil
 	}
 	for _, gp := range found {

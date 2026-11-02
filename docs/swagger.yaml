@@ -8,9 +8,32 @@ servers:
 security:
   - bearerAuth: []
 paths:
+  /ping:
+    get:
+      summary: Liveness check
+      security: []
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: {type: string, example: pong}
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      security: []
+      responses:
+        '200':
+          description: Metrics in the Prometheus text format
+          content:
+            text/plain:
+              schema: {type: string}
   /v1/budgets/{serviceOrderId}:
     get:
-      summary: Get the generated budget of a service order
+      summary: Get the budget of a service order
       description: Attendant, mechanic and admin see any budget; a customer sees only its own (other customers get 404).
       parameters:
         - name: serviceOrderId
@@ -26,6 +49,7 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
   /v1/payments/{serviceOrderId}:
     get:
       summary: Get the most recent payment of a service order
@@ -44,6 +68,7 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
   /v1/payments/{id}/confirm:
     post:
       summary: Approve a PENDING payment (emits PaymentApproved)
@@ -56,6 +81,7 @@ paths:
         - name: X-Request-Id
           in: header
           required: false
+          description: Copied to the emitted event. Generated when absent.
           schema: {type: string}
       responses:
         '204': {description: Approved}
@@ -63,6 +89,7 @@ paths:
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
   /v1/payments/{id}/reject:
     post:
       summary: Reject a PENDING payment (emits PaymentFailed with reason PAYMENT_REJECTED)
@@ -75,6 +102,7 @@ paths:
         - name: X-Request-Id
           in: header
           required: false
+          description: Copied to the emitted event. Generated when absent.
           schema: {type: string}
       responses:
         '204': {description: Rejected}
@@ -138,14 +166,16 @@ components:
       bearerFormat: JWT
   responses:
     Error:
-      description: Error
+      description: >
+        Error body. Middleware errors (401, 403) and handler errors (404, 409, 500) carry `code` and `error`.
+        `errors` is used for input validation (400) and is omitted otherwise.
       content:
         application/json:
           schema:
             type: object
             properties:
-              code: {type: integer}
-              error: {type: string}
+              code: {type: integer, example: 404}
+              error: {type: string, example: "budget not found"}
               errors:
                 type: array
                 items: {type: string}
@@ -163,7 +193,7 @@ components:
       properties:
         id: {type: string}
         service_order_id: {type: string}
-        status: {type: string, enum: [GENERATED]}
+        status: {type: string, enum: [GENERATED, CANCELLED]}
         total_amount: {type: string, example: "221.00"}
         items:
           type: array

@@ -12,6 +12,7 @@ metadata:
 # BILLING_QUEUE_URL / BILLING_EVENTS_TOPIC_ARN are applied by the docker workflow.
 data:
   PORT: "8083"
+  SERVICE_NAME: "billing-service"
   LOG_LEVEL: "INFO"
   POSTGRES_PORT: "5432"
   POSTGRES_SSLMODE: "disable"

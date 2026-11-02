@@ -22,7 +22,7 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     commit-message:
       prefix: "chore"
       include: scope
@@ -31,9 +31,8 @@ updates:
       - github-actions
     groups:
       github-actions:
-        update-types:
-          - minor
-          - patch
+        patterns:
+          - "*"
 
   - package-ecosystem: docker
     directory: "/"

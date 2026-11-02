@@ -3,40 +3,37 @@
 ## Layer Map
 
 ```
-HTTP → Handler (infra/handler/*) → Service (internal/services/*) → Repository (infra/repository/*) → PostgreSQL
+REST:      HTTP → routing (internal/app/routing) → Controller (internal/billing/controller.go) → Service
+Messaging: SQS → Consumer (internal/pkg/messaging/consumer.go) → Service handlers (RegisterHandlers)
+Outbox:    Service writes outbox rows in the same tx → Relay (internal/pkg/messaging/relay.go) → SNS
+                                  Service (internal/billing/service.go)
                                          ↕
-                               Domain (internal/domain/*)
+                        Domain (internal/budget, internal/payment)
+                                         ↓
+                     Repository (internal/{budget,payment}/repository) → PostgreSQL
 ```
 
 ## Layer Contracts
-- **Handler**: parse + validate HTTP input, call service, return response — zero business logic.
-- **Service**: all business logic, status enforcement, stock checks, budget recalc.
-- **Repository**: all SQL via `lib/pq` — no queries outside repositories.
-- **Domain**: framework-free structs + validation methods + service/repository interfaces.
+- **Routing / middleware** (`internal/app`): mount routes, role checks (`middleware.Auth`), logging, metrics, recovery. No business logic.
+- **Controller** (`internal/billing/controller.go`): read route params and claims, call the service, map to response DTOs. Gin types stay in `internal/app`.
+- **Service** (`internal/billing/service.go`): command handlers, status enforcement, budget dedupe, payment decision flow. Opens its own `*sql.Tx` where needed. No SQL.
+- **Repository** (`internal/{budget,payment}/repository`): all SQL, using `lib/pq` through `db.Executor`. Holds no `*sql.DB`.
+- **Domain** (`internal/budget`, `internal/payment`): structs, constructors, transitions and sentinel errors. No framework imports.
 
 ## DI Root
-`internal/infra/factory/http.go` — single wiring file: creates DB, repos, services, handlers, passes into `HandlersWrapper`. All constructor injection happens here.
+`internal/app/bootstrap/bootstrap.go` builds the DB connection, repositories, provider (`PAYMENT_MODE`), service, controller, HTTP server and messaging workers. `internal/app/container` holds the handler and middleware wrappers passed to routing.
 
 ## Repository DB Connection Pattern
-Repositories hold no `*sql.DB`. Connection comes from context, injected by UoW:
-- **Mutating ops** (inside tx): `postgres.GetTransaction(ctx)` → returns `*sql.Tx` stored by UoW `OnStart` hook.
-- **Read-only ops**: `postgres.GetOneTimeTransaction(ctx)` → opens a fresh `*sql.DB` connection.
+Repositories take a `db.Executor` argument (`internal/pkg/db/executor.go`), implemented by `*sql.DB` and `*sql.Tx`. The caller chooses the connection:
+- **Writes inside a command**: the service passes the `*sql.Tx` it opened (consumer dedupe + effect + outbox + commit).
+- **REST reads**: the service passes its `*sql.DB`.
 
-## Transactions (consumer and REST)
-Commands run inside the transaction given by the consumer (dedupe + effect + outbox + commit). REST decisions open their own `*sql.Tx`. Repositories take `db.Executor`, so they work with `*sql.DB` or `*sql.Tx`.
+## Transactions
+- Consumer (`internal/pkg/messaging/consumer.go`): one transaction per message for dedupe (`processed_message`), the command effect and the outbox write.
+- REST decisions (`Confirm` / `Reject`, `service.decide`): the service opens its own `*sql.Tx`.
+- Outbox relay (`relay.go`): selects a pending batch in one transaction, publishes it to SNS and marks the rows published; failed rows stay pending.
 
-## Unit of Work
-```go
-uow.Execute(ctx, func1, func2, ...)
-```
-UoW begins a transaction, injects it into context, runs all steps, then commits or rolls back. Services must wrap all mutating repository calls in `uow.Execute`.
+`internal/pkg/uow` (Unit of Work) exists with a Postgres and an in-memory variant, but no production code path uses it today; the transactions above are opened directly. Do not add new code on top of it without deciding whether it stays.
 
 ## Dynamic SQL
-Use `db.QueryBuilder(baseQuery)` from `internal/pkg/db/`:
-```go
-qb := db.QueryBuilder(base)
-qb.Add("column =", value)
-qb.OrderBy(field, db.ASC)
-qb.AddPagination(limit, offset)
-query, args := qb.Build()
-```
+`db.QueryBuilder(baseQuery)` (`internal/pkg/db/query_builder.go`) builds WHERE / GROUP BY / ORDER BY / LIMIT clauses. No production query uses it today; the current repositories use fixed SQL.

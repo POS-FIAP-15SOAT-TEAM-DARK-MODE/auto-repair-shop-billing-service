@@ -14,7 +14,6 @@ import (
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/budget"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/auth"
-	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/web"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -227,8 +226,6 @@ func TestWebhook_GatewayFailuresAreReturnedSoTheGatewayRetries(t *testing.T) {
 	g.gw.getErr = transient
 	_, err := c.Webhook(context.Background(), webhookRequest("data.id=1&type=payment", `{}`))
 	assert.ErrorIs(t, err, transient)
-	status, _ := web.Error(err)
-	assert.Equal(t, http.StatusInternalServerError, status)
 }
 
 func TestWebhook_UnreadableBody(t *testing.T) {

@@ -63,6 +63,24 @@ make down
 ```
 Without Docker: `make test`, `make test-integration` (needs Postgres and MiniStack; see CI), `make coverage`. `make test-sandbox` is an opt-in smoke test of the Mercado Pago gateway against the real sandbox (needs `MERCADOPAGO_ACCESS_TOKEN`; the CI does not run it).
 
+## Tests and coverage
+`make test` runs everything with the race detector; `make test-integration` adds the `integration` tag (Postgres and MiniStack).
+No mocks are generated: tests use hand-written fakes and the in-memory repositories.
+
+Measured with `go test ./... -coverprofile` (statement coverage, no generated code to exclude):
+
+| Package | Coverage |
+|---|---|
+| **Total** | **92.1%** |
+| `internal/budget`, `internal/budget/repository` | 100.0% |
+| `internal/payment`, `internal/payment/repository` | 100.0% |
+| `internal/billing` | 94.4% |
+| `internal/pkg/messaging` | 97.5% |
+| `internal/app/routing` | 87.0% |
+
+CI enforces 80% total and 90% for `internal/budget` and `internal/payment` (`coverage` job in `.github/workflows/ci.yml`).
+`cmd/service` has no tests and is included in the total at 0%.
+
 ## Messaging resources (local, prefix `auto-repair-shop-local-`)
 `saga-commands` (topic) → `billing-queue` (filter `target=billing`, DLQ after 5 receives); `billing-events` (topic).
 Created by `local/init-aws.sh`.

@@ -70,7 +70,7 @@ func (s *Service) GenerateBudget(ctx context.Context, tx *sql.Tx, env messaging.
 	_, err = s.budgets.FindGeneratedByServiceOrder(ctx, tx, env.ServiceOrderID)
 	switch {
 	case err == nil:
-		logger.Of(ctx).Info("budget already generated, nothing to do", zap.String("service_order_id", env.ServiceOrderID))
+		logger.Of(ctx).Info("budget already generated, nothing to do", zap.String("event", "budget.already_generated"))
 		return nil
 	case !errors.Is(err, budget.ErrNotFound):
 		return err
@@ -116,14 +116,14 @@ func (s *Service) RequestPayment(ctx context.Context, tx *sql.Tx, env messaging.
 
 	b, err := s.budgets.FindGeneratedByServiceOrder(ctx, tx, env.ServiceOrderID)
 	if errors.Is(err, budget.ErrNotFound) {
-		logger.Of(ctx).Warn("request payment discarded: no generated budget", zap.String("service_order_id", env.ServiceOrderID))
+		logger.Of(ctx).Warn("request payment discarded: no generated budget", zap.String("event", "payment.request_discarded"), zap.String("reason", "no_generated_budget"))
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if !amount.Equal(b.TotalAmount) {
-		logger.Of(ctx).Warn("request payment discarded: amount differs from budget total", zap.String("service_order_id", env.ServiceOrderID))
+		logger.Of(ctx).Warn("request payment discarded: amount differs from budget total", zap.String("event", "payment.request_discarded"), zap.String("reason", "amount_differs"))
 		return nil
 	}
 
@@ -131,7 +131,7 @@ func (s *Service) RequestPayment(ctx context.Context, tx *sql.Tx, env messaging.
 	switch {
 	case err == nil:
 		if latest.Status == payment.StatusPending || latest.Status == payment.StatusApproved {
-			logger.Of(ctx).Warn("request payment discarded: open payment exists", zap.String("service_order_id", env.ServiceOrderID))
+			logger.Of(ctx).Warn("request payment discarded: open payment exists", zap.String("event", "payment.request_discarded"), zap.String("reason", "open_payment_exists"))
 			return nil
 		}
 	case !errors.Is(err, payment.ErrNotFound):
@@ -298,7 +298,11 @@ func (s *Service) publish(ctx context.Context, tx *sql.Tx, sagaID, serviceOrderI
 	if err != nil {
 		return err
 	}
-	return messaging.Enqueue(ctx, tx, topicBillingEvents, "", ev)
+	if err := messaging.Enqueue(ctx, tx, topicBillingEvents, "", ev); err != nil {
+		return err
+	}
+	logger.Of(ctx).Info("event enqueued", zap.String("event", eventNames[typ]))
+	return nil
 }
 
 func decodePayload(env messaging.Envelope, into any) error {

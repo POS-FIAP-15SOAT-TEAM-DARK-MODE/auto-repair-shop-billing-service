@@ -12,8 +12,12 @@ import (
 
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/budget"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/logger"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // fakeGateway is a payment.Gateway that records its calls and answers from fields the tests set.
@@ -968,4 +972,79 @@ func TestGateway_MetricsPublishThePendingBacklog(t *testing.T) {
 	empty.svc.ProcessGatewayWork(context.Background())
 	assert.Equal(t, 0.0, testutil.ToFloat64(metrics.PaymentsPending))
 	assert.Equal(t, 0.0, testutil.ToFloat64(metrics.PaymentsPendingOldestAge), "no pending payment, no age")
+}
+
+// ---- log events ----
+
+func captureLogs(t *testing.T) *observer.ObservedLogs {
+	t.Helper()
+	core, logs := observer.New(zapcore.DebugLevel)
+	t.Cleanup(logger.ReplaceGlobal(zap.New(core)))
+	return logs
+}
+
+func eventsOf(logs *observer.ObservedLogs) map[string]observer.LoggedEntry {
+	out := map[string]observer.LoggedEntry{}
+	for _, e := range logs.All() {
+		if ev, ok := e.ContextMap()["event"].(string); ok {
+			out[ev] = e
+		}
+	}
+	return out
+}
+
+func TestGateway_LogsCarryEventNamesAndTheSagaIds(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	g.tx(1)
+	_, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "approved", "221"))
+	require.NoError(t, err)
+	g.tx(0)
+	_, err = g.svc.ApplyGatewayPayment(context.Background(), gp("1002", "approved", "221")) // a second approval
+	require.NoError(t, err)
+
+	got := eventsOf(logs)
+	applied := got["payment.status_applied"]
+	assert.Equal(t, "payment status applied from the gateway", applied.Message, "the message text stays stable")
+	assert.Equal(t, "saga-1", applied.ContextMap()["saga_id"])
+	assert.Equal(t, "SO-1", applied.ContextMap()["service_order_id"])
+	unsettled := got["payment.unsettled"]
+	assert.Equal(t, "extra_approval", unsettled.ContextMap()["reason"])
+	g.assertDB()
+}
+
+func TestGateway_WorkerFailuresAreLoggedAsEvents(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	g.gw.findErr = transient
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	failed := eventsOf(logs)["gateway.worker_step_failed"]
+	assert.Equal(t, "RECONCILE", failed.ContextMap()["step"])
+	assert.Equal(t, true, failed.ContextMap()["transient"])
+	assert.Equal(t, "saga-1", failed.ContextMap()["saga_id"])
+}
+
+func TestGateway_NotApplicablePaymentsAreLoggedWithAReason(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	g.tx(0)
+	_, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "in_mediation", "221"))
+	require.NoError(t, err)
+	g.tx(0)
+	_, err = g.svc.ApplyGatewayPayment(context.Background(), payment.GatewayPayment{ID: "9", Status: "approved", ExternalReference: "nope", Amount: decimal.NewFromInt(1)})
+	require.NoError(t, err)
+
+	var reasons []any
+	for _, e := range logs.All() {
+		if e.ContextMap()["event"] == "gateway.payment_not_applied" {
+			reasons = append(reasons, e.ContextMap()["reason"])
+		}
+	}
+	assert.ElementsMatch(t, []any{"status_not_mapped", "unknown_payment"}, reasons)
+	g.assertDB()
 }
