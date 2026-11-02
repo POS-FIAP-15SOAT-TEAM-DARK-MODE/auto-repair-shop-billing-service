@@ -53,6 +53,16 @@ func mountSwaggerUI(router *gin.Engine) {
 	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, ginSwagger.URL("/swagger.yaml")))
 }
 
+// respondError writes the error body and, when the body is generic, logs the full
+// error (root cause included) with the request logger carried by ctx.
+func respondError(ctx context.Context, c *gin.Context, err error) {
+	status, body := web.Error(err)
+	if web.ShouldLog(err, status) {
+		logger.Of(ctx).Error(err, zap.Int("status", status))
+	}
+	c.JSON(status, body)
+}
+
 // GinOnlyErrorHandler adapts a func(ctx, req) error controller to gin.
 func GinOnlyErrorHandler(cb func(context.Context, *http2.Request) error, customStatus ...int) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -62,8 +72,7 @@ func GinOnlyErrorHandler(cb func(context.Context, *http2.Request) error, customS
 		}
 
 		if err := cb(ctx, c.Request); err != nil {
-			status, errResp := web.Error(err)
-			c.JSON(status, errResp)
+			respondError(ctx, c, err)
 			return
 		}
 
@@ -88,8 +97,7 @@ func GinHandler[T any](cb func(context.Context, *http2.Request) (T, error), cust
 
 		resp, err := cb(ctx, c.Request)
 		if err != nil {
-			status, errResp := web.Error(err)
-			c.JSON(status, errResp)
+			respondError(ctx, c, err)
 			return
 		}
 

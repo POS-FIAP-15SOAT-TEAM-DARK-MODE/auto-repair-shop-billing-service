@@ -89,5 +89,5 @@ func TestErrorHandlerMiddleware_StatusOKWithErrors(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Contains(t, rec.Body.String(), "silent error")
+	assert.JSONEq(t, `{"code":500,"error":"internal server error"}`, rec.Body.String())
 }

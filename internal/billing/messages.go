@@ -53,6 +53,15 @@ type paymentRefundedPayload struct {
 
 const reasonPaymentRejected = "PAYMENT_REJECTED"
 
+// eventNames maps the outbox event types to the <entidade>.<ação> names written in the logs.
+var eventNames = map[string]string{
+	evBudgetGenerated: "budget.generated",
+	evBudgetCancelled: "budget.cancelled",
+	evPaymentApproved: "payment.approved",
+	evPaymentFailed:   "payment.failed",
+	evPaymentRefunded: "payment.refunded",
+}
+
 const (
 	topicBillingEvents = "billing-events"
 

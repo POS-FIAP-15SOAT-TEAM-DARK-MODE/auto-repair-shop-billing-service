@@ -11,7 +11,5 @@ const (
 
 var (
 	AttendantRoles            = []Role{ATTENDANT, ADMIN}
-	MechanicRoles             = []Role{MECHANIC, ADMIN}
-	CustomerRoles             = []Role{CUSTOMER, ADMIN}
 	AttendantAndMechanicRoles = []Role{ATTENDANT, MECHANIC, ADMIN}
 )

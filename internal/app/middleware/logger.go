@@ -34,7 +34,7 @@ func Logger() gin.HandlerFunc {
 			zap.String("ip", c.ClientIP()),
 		}
 
-		logger.Of(ctx).Info("starting request", fields...)
+		logger.Of(ctx).Info("starting request", append(fields, zap.String("event", "request.started"))...)
 
 		c.Next()
 
@@ -44,11 +44,11 @@ func Logger() gin.HandlerFunc {
 
 		if len(c.Errors) > 0 {
 			for _, e := range c.Errors.Errors() {
-				logger.Of(ctx).Error(errors.New(e), fields...)
+				logger.Of(ctx).Error(errors.New(e), append(fields, zap.String("event", "request.failed"))...)
 			}
 			return
 		}
 
-		logger.Of(ctx).Info("ending request", fields...)
+		logger.Of(ctx).Info("ending request", append(fields, zap.String("event", "request.completed"))...)
 	}
 }
