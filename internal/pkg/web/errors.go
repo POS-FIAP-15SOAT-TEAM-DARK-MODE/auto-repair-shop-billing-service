@@ -28,6 +28,19 @@ func Error(err error) (int, errorResponse) {
 	}
 }
 
+// ShouldLog reports whether the full error must go to the server log: every 5xx and
+// the 409/422 answered with a generic message (the client never sees their cause).
+func ShouldLog(err error, status int) bool {
+	switch status {
+	case http.StatusConflict:
+		return !errors.Is(err, payment.ErrInvalidTransition)
+	case http.StatusUnprocessableEntity:
+		return true
+	default:
+		return status >= http.StatusInternalServerError
+	}
+}
+
 // getHTTPStatus determines the HTTP status code for a given error.
 func getHTTPStatus(err error) int {
 	switch {

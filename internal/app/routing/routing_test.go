@@ -3,12 +3,15 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/app"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/app/container"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/billing"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/budget"
@@ -16,6 +19,7 @@ import (
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
 	paymentRepo "github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment/repository"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/auth"
+	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,7 +85,9 @@ func TestRouting_GetBudget(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "150.00", body["total_amount"])
 
-	assert.Equal(t, http.StatusNotFound, do(f.router, http.MethodGet, "/v1/budgets/SO-404", token(t, "staff", auth.ATTENDANT)).Code)
+	notFound := do(f.router, http.MethodGet, "/v1/budgets/SO-404", token(t, "staff", auth.ATTENDANT))
+	assert.Equal(t, http.StatusNotFound, notFound.Code)
+	assert.JSONEq(t, `{"code":404,"error":"budget not found"}`, notFound.Body.String())
 	assert.Equal(t, http.StatusNotFound, do(f.router, http.MethodGet, "/v1/budgets/SO-1", token(t, "other", auth.CUSTOMER)).Code)
 }
 
@@ -108,4 +114,24 @@ func TestRouting_Payments(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, do(f.router, http.MethodPost, "/v1/payments/p1/confirm", token(t, "c", auth.CUSTOMER)).Code)
 	assert.Equal(t, http.StatusNotFound, do(f.router, http.MethodGet, "/v1/payments/SO-404", token(t, "staff", auth.ATTENDANT)).Code)
+}
+
+func TestGinHandler_GenericBodyAndNoRootCause(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rootCause := errors.New(`pq: duplicate key value violates unique constraint "payment_pkey"`)
+	r := gin.New()
+	r.GET("/internal", GinHandler(func(context.Context, *http.Request) (struct{}, error) {
+		return struct{}{}, fmt.Errorf("save: %w", rootCause)
+	}))
+	r.GET("/conflict", GinOnlyErrorHandler(func(context.Context, *http.Request) error {
+		return fmt.Errorf("%w: %w", app.ErrDataConflict, rootCause)
+	}))
+
+	rec := do(r, http.MethodGet, "/internal", "")
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.JSONEq(t, `{"code":500,"error":"internal server error"}`, rec.Body.String())
+
+	rec = do(r, http.MethodGet, "/conflict", "")
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.JSONEq(t, `{"code":409,"error":"conflict"}`, rec.Body.String())
 }

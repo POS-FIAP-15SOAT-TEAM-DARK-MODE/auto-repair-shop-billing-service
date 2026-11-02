@@ -71,3 +71,12 @@ func TestError_InfrastructureCauseNeverInBody(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldLog(t *testing.T) {
+	assert.True(t, ShouldLog(rootCause, http.StatusInternalServerError))
+	assert.True(t, ShouldLog(app.ErrDataConflict, http.StatusConflict))
+	assert.True(t, ShouldLog(app.ErrDataViolation, http.StatusUnprocessableEntity))
+	assert.False(t, ShouldLog(payment.ErrInvalidTransition, http.StatusConflict))
+	assert.False(t, ShouldLog(budget.ErrNotFound, http.StatusNotFound))
+	assert.False(t, ShouldLog(jsonv2.ErrJSONSyntax, http.StatusBadRequest))
+}
