@@ -29,7 +29,7 @@ paths:
   /v1/payments/{serviceOrderId}:
     get:
       summary: Get the most recent payment of a service order
-      description: Attendant and admin. For a payment charged through Mercado Pago the response carries the checkout link (`checkout_url`) the attendant gives to the customer, and when it stops being payable (`expires_at`). The customer does not see the payment.
+      description: Attendant and admin.
       parameters:
         - name: serviceOrderId
           in: path
@@ -47,7 +47,7 @@ paths:
   /v1/payments/{id}/confirm:
     post:
       summary: Approve a PENDING payment (emits PaymentApproved)
-      description: Attendant and admin. In mercadopago mode a payment charged through Mercado Pago answers 409, because Mercado Pago decides its status.
+      description: Attendant and admin.
       parameters:
         - name: id
           in: path
@@ -66,7 +66,7 @@ paths:
   /v1/payments/{id}/reject:
     post:
       summary: Reject a PENDING payment (emits PaymentFailed with reason PAYMENT_REJECTED)
-      description: Attendant and admin. In mercadopago mode a payment charged through Mercado Pago answers 409, because Mercado Pago decides its status.
+      description: Attendant and admin.
       parameters:
         - name: id
           in: path
@@ -84,17 +84,13 @@ paths:
         '409': {$ref: '#/components/responses/Error'}
   /v1/webhooks/mercadopago:
     post:
-      summary: Mercado Pago payment notification (only in mercadopago mode)
-      description: >
-        Public: it is authenticated only by the `x-signature` header, which is verified before anything else.
-        The body is never trusted for payment data; Billing reads the payment from Mercado Pago by `data.id`.
-        Notifications of other types are acknowledged and ignored. Any 5xx makes Mercado Pago retry.
+      summary: Mercado Pago payment notification
+      description: Public; authenticated by the `x-signature` header.
       security: []
       parameters:
         - name: data.id
           in: query
           required: true
-          description: Id of the Mercado Pago payment (signed value).
           schema: {type: string, example: "186237542593"}
         - name: type
           in: query
@@ -183,5 +179,5 @@ components:
         status: {type: string, enum: [PENDING, APPROVED, REJECTED, REFUNDED, CANCELLED]}
         provider: {type: string, enum: [internal, mercadopago], example: internal}
         created_at: {type: string, format: date-time}
-        checkout_url: {type: string, description: "Only for mercadopago payments once the checkout is open (init_point)."}
-        expires_at: {type: string, format: date-time, description: "Only for mercadopago payments."}
+        checkout_url: {type: string, description: "Mercado Pago payments only."}
+        expires_at: {type: string, format: date-time, description: "Mercado Pago payments only."}
