@@ -23,7 +23,7 @@ not hold the database transaction of a command. The saga, its message contracts 
    default) and returns. Nothing remote happens inside the command transaction.
 4. **A gateway worker does the remote work**, one pass every few seconds, each step reading its work from the
    database (`WorkKind`), calling the gateway outside a transaction and recording the result in a short one:
-   open the checkout (idempotency key `checkout-<payment id>`), reconcile pending payments by
+   open the checkout (the key `checkout-<payment id>` is sent, but Mercado Pago does not honor it for preferences, so a retry first searches an open preference of the payment), reconcile pending payments by
    `external_reference`, expire unpaid checkouts, submit refunds, and close the checkout of finished
    payments. Failures back off (5 s doubling up to 5 min) and never block other payments.
 5. **One place changes a status.** `ApplyGatewayPayment` is used by the webhook, the reconciliation and the

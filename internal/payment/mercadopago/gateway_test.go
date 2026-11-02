@@ -62,6 +62,12 @@ func (f *fakeRequester) Do(req *http.Request) (*http.Response, error) {
 
 func newGateway(t *testing.T, answers map[string]answer) (*Gateway, *fakeRequester) {
 	t.Helper()
+	if _, ok := answers["GET /checkout/preferences/search"]; !ok {
+		if answers == nil {
+			answers = map[string]answer{}
+		}
+		answers["GET /checkout/preferences/search"] = answer{200, `{"elements":[],"total":0}`} // no open preference yet
+	}
 	fr := &fakeRequester{answers: answers}
 	g, err := New("TEST-token", config.WithHTTPClient(fr))
 	require.NoError(t, err)
@@ -81,7 +87,7 @@ func TestCreateCheckout_SendsTheExpectedPreference(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, payment.Checkout{ExternalID: "pref-1", URL: "https://mp/init"}, got, "init_point is the only URL used")
 
-	call := fr.calls[0]
+	call := fr.calls[len(fr.calls)-1]
 	assert.Equal(t, "Bearer TEST-token", call.header.Get("Authorization"))
 	assert.Equal(t, "checkout-pay-1", call.header.Get("X-Idempotency-Key"))
 	assert.Equal(t, "pay-1", call.body["external_reference"])
@@ -99,7 +105,7 @@ func TestCreateCheckout_OmitsAnEmptyNotificationURL(t *testing.T) {
 	g, fr := newGateway(t, map[string]answer{"POST /checkout/preferences": {201, `{"id":"p","init_point":"u"}`}})
 	_, err := g.CreateCheckout(context.Background(), payment.CheckoutRequest{PaymentID: "x", Title: "t", Amount: decimal.NewFromInt(1), ExpiresAt: time.Now()})
 	require.NoError(t, err)
-	_, present := fr.calls[0].body["notification_url"]
+	_, present := fr.calls[len(fr.calls)-1].body["notification_url"]
 	assert.False(t, present)
 }
 
@@ -201,4 +207,68 @@ func TestExpireCheckout_SendsAPastExpiration(t *testing.T) {
 func TestNew_RejectsAnInvalidConfig(t *testing.T) {
 	_, err := New("TEST-token", config.WithHTTPClient(nil))
 	assert.Error(t, err)
+}
+
+func TestCreateCheckout_ReusesAnOpenPreferenceOfThePayment(t *testing.T) {
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	g, fr := newGateway(t, map[string]answer{
+		"GET /checkout/preferences/search": {200, `{"total":2,"elements":[
+			{"id":"pref-old","external_reference":"pay-1","date_created":"2026-11-02T10:00:00Z","expiration_date_to":"` + future + `"},
+			{"id":"pref-new","external_reference":"pay-1","date_created":"2026-11-02T11:00:00Z","expiration_date_to":"` + future + `"}]}`},
+		"GET /checkout/preferences/pref-new": {200, `{"id":"pref-new","init_point":"https://mp/init-new"}`},
+	})
+
+	co, err := g.CreateCheckout(context.Background(), payment.CheckoutRequest{PaymentID: "pay-1", Title: "t", Amount: decimal.NewFromInt(1), ExpiresAt: time.Now()})
+
+	require.NoError(t, err)
+	assert.Equal(t, payment.Checkout{ExternalID: "pref-new", URL: "https://mp/init-new"}, co)
+	for _, c := range fr.calls {
+		assert.NotEqual(t, "POST", c.method, "no second preference is created")
+	}
+	assert.Equal(t, "pay-1", queryOf(fr.calls[0])["external_reference"])
+}
+
+func TestCreateCheckout_DoesNotReuseAnExpiredOrForeignPreference(t *testing.T) {
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	g, fr := newGateway(t, map[string]answer{
+		"GET /checkout/preferences/search": {200, `{"total":2,"elements":[
+			{"id":"closed","external_reference":"pay-1","expiration_date_to":"` + past + `"},
+			{"id":"other","external_reference":"pay-2","expiration_date_to":"` + future + `"}]}`},
+		"POST /checkout/preferences": {201, `{"id":"pref-1","init_point":"https://mp/init"}`},
+	})
+
+	co, err := g.CreateCheckout(context.Background(), payment.CheckoutRequest{PaymentID: "pay-1", Title: "t", Amount: decimal.NewFromInt(1), ExpiresAt: time.Now().Add(time.Hour)})
+
+	require.NoError(t, err)
+	assert.Equal(t, "pref-1", co.ExternalID)
+	assert.Equal(t, "POST", fr.calls[len(fr.calls)-1].method)
+}
+
+func TestCreateCheckout_SearchFailuresAreReportedAndInvalidTokenIsRetried(t *testing.T) {
+	g, _ := newGateway(t, map[string]answer{"GET /checkout/preferences/search": {500, `{"message":"down"}`}})
+	_, err := g.CreateCheckout(context.Background(), payment.CheckoutRequest{PaymentID: "pay-1", Title: "t", Amount: decimal.NewFromInt(1), ExpiresAt: time.Now()})
+	require.Error(t, err)
+	assert.True(t, payment.IsTransient(err))
+
+	g, _ = newGateway(t, map[string]answer{"GET /checkout/preferences/search": {400, `{"message":"invalid_token","error":"bad_request","status":400}`}})
+	_, err = g.CreateCheckout(context.Background(), payment.CheckoutRequest{PaymentID: "pay-1", Title: "t", Amount: decimal.NewFromInt(1), ExpiresAt: time.Now()})
+	require.Error(t, err)
+	assert.True(t, payment.IsTransient(err), "a rejected token is a configuration problem: retried, not fatal")
+
+	g, _ = newGateway(t, map[string]answer{"GET /checkout/preferences/search": {200, `{"total":1,"elements":[{"id":"p","external_reference":"pay-1","expiration_date_to":"` + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + `"}]}`},
+		"GET /checkout/preferences/p": {500, `{"message":"down"}`}})
+	_, err = g.CreateCheckout(context.Background(), payment.CheckoutRequest{PaymentID: "pay-1", Title: "t", Amount: decimal.NewFromInt(1), ExpiresAt: time.Now()})
+	require.Error(t, err)
+	assert.True(t, payment.IsTransient(err))
+}
+
+func queryOf(c recorded) map[string]string {
+	out := map[string]string{}
+	for _, kv := range strings.Split(c.query, "&") {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			out[k] = v
+		}
+	}
+	return out
 }

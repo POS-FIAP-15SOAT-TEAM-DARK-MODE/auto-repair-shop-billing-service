@@ -49,3 +49,9 @@ func TestGatewayManaged(t *testing.T) {
 	assert.False(t, (&Payment{Provider: ProviderName, ExternalID: "pref-1"}).GatewayManaged())
 	assert.True(t, (&Payment{Provider: ProviderMercadoPago}).GatewayManaged(), "even before the checkout exists")
 }
+
+func TestIsNotFound(t *testing.T) {
+	assert.True(t, IsNotFound(&GatewayError{NotFound: true, Err: errors.New("404")}))
+	assert.False(t, IsNotFound(&GatewayError{Err: errors.New("400")}))
+	assert.False(t, IsNotFound(errors.New("plain")))
+}

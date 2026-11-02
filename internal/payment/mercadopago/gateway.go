@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mercadopago/sdk-go/pkg/config"
@@ -42,9 +43,16 @@ func New(accessToken string, opts ...config.Option) (*Gateway, error) {
 }
 
 // CreateCheckout opens a Checkout Pro preference with one item whose price is the payment amount.
-// The SDK models unit_price as float64, so the conversion happens here and nowhere else. The
-// idempotency key is derived from the payment id, so a retry never creates a second preference.
+// The SDK models unit_price as float64, so the conversion happens here and nowhere else.
+// Mercado Pago does not honor the idempotency key when it creates a preference (the sandbox smoke test
+// showed two preferences for one key), so a retry first looks for a preference that is still open for
+// the same payment, and the key is sent anyway in case the API starts honoring it.
 func (g *Gateway) CreateCheckout(ctx context.Context, req payment.CheckoutRequest) (payment.Checkout, error) {
+	if co, found, err := g.findOpenCheckout(ctx, req.PaymentID); err != nil {
+		return payment.Checkout{}, err
+	} else if found {
+		return co, nil
+	}
 	expires := req.ExpiresAt.UTC()
 	r := preference.Request{
 		Items: []preference.ItemRequest{{
@@ -63,6 +71,36 @@ func (g *Gateway) CreateCheckout(ctx context.Context, req payment.CheckoutReques
 		return payment.Checkout{}, classify("create preference", err)
 	}
 	return payment.Checkout{ExternalID: resp.ID, URL: resp.InitPoint}, nil
+}
+
+// findOpenCheckout returns the newest preference of the payment that has not expired yet. A preference
+// closed by ExpireCheckout has a past expiration date, so it is not reused.
+func (g *Gateway) findOpenCheckout(ctx context.Context, paymentID string) (payment.Checkout, bool, error) {
+	resp, err := g.preferences.Search(ctx, preference.SearchRequest{
+		Limit:   30,
+		Filters: map[string]string{"external_reference": paymentID},
+	})
+	if err != nil {
+		return payment.Checkout{}, false, classify("search preferences", err)
+	}
+	var newest *preference.SearchResponse
+	for i := range resp.Elements {
+		el := &resp.Elements[i]
+		if el.ExternalReference != paymentID || !el.ExpirationDateTo.After(time.Now()) {
+			continue
+		}
+		if newest == nil || el.DateCreated.After(newest.DateCreated) {
+			newest = el
+		}
+	}
+	if newest == nil {
+		return payment.Checkout{}, false, nil
+	}
+	pref, err := g.preferences.Get(ctx, newest.ID)
+	if err != nil {
+		return payment.Checkout{}, false, classify("get preference", err)
+	}
+	return payment.Checkout{ExternalID: pref.ID, URL: pref.InitPoint}, true, nil
 }
 
 func (g *Gateway) FindPayments(ctx context.Context, externalReference string) ([]payment.GatewayPayment, error) {
@@ -153,6 +191,10 @@ func classify(op string, err error) error {
 	var re *mperror.ResponseError
 	if errors.As(err, &re) {
 		transient, notFound = isTransientStatus(re.StatusCode), re.StatusCode == 404
+		// the preference search answers a rejected token with 400 invalid_token (the sandbox showed it)
+		if strings.Contains(re.Error(), "invalid_token") {
+			transient = true
+		}
 	}
 	return &payment.GatewayError{Transient: transient, NotFound: notFound, Err: fmt.Errorf("%s: %w", op, err)}
 }
