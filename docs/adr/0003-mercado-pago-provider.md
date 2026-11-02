@@ -57,7 +57,8 @@ not hold the database transaction of a command. The saga, its message contracts 
   is now used by `RefundPayment` and by `confirm`/`reject`.
 - Known gaps, listed in the RFC: a refund through the Mercado Pago API returned `401` ("Unauthorized use of live
   credentials") in the sandbox, so a refund can stay requested and is retried with a backoff; a late or extra
-  approval is only logged and needs a manual refund; the real webhook is verified once the service runs in
+  approval is only logged and needs a manual refund; a refund or chargeback made outside the saga on an
+  `APPROVED` payment is seen only through the webhook, because the reconciliation covers `PENDING` payments; the real webhook is verified once the service runs in
   the AWS Lab.
 - The backoff and the "refund already submitted" marker live in memory. After a restart a step simply runs
   again, which is safe because the gateway calls are idempotent.
