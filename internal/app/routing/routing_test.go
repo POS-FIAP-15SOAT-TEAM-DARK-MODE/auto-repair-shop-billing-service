@@ -116,6 +116,34 @@ func TestRouting_Payments(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, do(f.router, http.MethodGet, "/v1/payments/SO-404", token(t, "staff", auth.ATTENDANT)).Code)
 }
 
+type stubVerifier struct{ err error }
+
+func (v stubVerifier) Verify(string, string, string) error { return v.err }
+
+type stubGateway struct{ payment.Gateway }
+
+func TestWebhookRoute_IsPublicAndOnlyRegisteredInGatewayMode(t *testing.T) {
+	db, _, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	svc := billing.NewService(db, budgetRepo.NewInMemory(), paymentRepo.NewInMemory(), payment.NewInternalProvider(payment.ModeManual), func() string { return "id" })
+
+	// internal modes: no route
+	internal := SetupRouter(&container.HandlersWrapper{Billing: billing.NewController(svc)}, &container.Middlewares{})
+	assert.Equal(t, http.StatusNotFound, do(internal, http.MethodPost, "/v1/webhooks/mercadopago", "").Code)
+
+	// gateway mode: public route, authenticated only by the signature
+	svc.WithGateway(billing.GatewayConfig{Gateway: stubGateway{}})
+	gw := SetupRouter(&container.HandlersWrapper{Billing: billing.NewController(svc).WithWebhook(stubVerifier{err: errors.New("bad")})}, &container.Middlewares{})
+	rec := do(gw, http.MethodPost, "/v1/webhooks/mercadopago?data.id=1&type=payment", "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "reaches the handler with no JWT and is refused by the signature")
+
+	ok := SetupRouter(&container.HandlersWrapper{Billing: billing.NewController(svc).WithWebhook(stubVerifier{})}, &container.Middlewares{})
+	rec = do(ok, http.MethodPost, "/v1/webhooks/mercadopago?data.id=1&type=merchant_order", "")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ignored")
+}
+
 func TestGinHandler_GenericBodyAndNoRootCause(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rootCause := errors.New(`pq: duplicate key value violates unique constraint "payment_pkey"`)

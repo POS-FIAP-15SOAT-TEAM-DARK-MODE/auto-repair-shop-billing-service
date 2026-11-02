@@ -110,6 +110,53 @@ paths:
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
+  /v1/webhooks/mercadopago:
+    post:
+      summary: Mercado Pago payment notification
+      description: Public; authenticated by the `x-signature` header.
+      security: []
+      parameters:
+        - name: data.id
+          in: query
+          required: true
+          schema: {type: string, example: "186237542593"}
+        - name: type
+          in: query
+          required: false
+          schema: {type: string, example: payment}
+        - name: x-signature
+          in: header
+          required: true
+          description: "ts=<milliseconds>,v1=<hex HMAC-SHA256 of id:<data.id>;request-id:<x-request-id>;ts:<ts>;>"
+          schema: {type: string}
+        - name: x-request-id
+          in: header
+          required: false
+          schema: {type: string}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type: {type: string, example: payment}
+                action: {type: string, example: payment.updated}
+                data:
+                  type: object
+                  properties:
+                    id: {type: string, example: "186237542593"}
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result: {type: string, enum: [applied, duplicate, ignored, unknown, refund_scheduled]}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
         '500': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
@@ -160,5 +207,7 @@ components:
         service_order_id: {type: string}
         amount: {type: string, example: "221.00"}
         status: {type: string, enum: [PENDING, APPROVED, REJECTED, REFUNDED, CANCELLED]}
-        provider: {type: string, example: internal}
+        provider: {type: string, enum: [internal, mercadopago], example: internal}
         created_at: {type: string, format: date-time}
+        checkout_url: {type: string, description: "Mercado Pago payments only."}
+        expires_at: {type: string, format: date-time, description: "Mercado Pago payments only."}

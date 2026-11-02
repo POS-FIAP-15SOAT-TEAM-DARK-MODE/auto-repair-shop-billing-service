@@ -1,0 +1,25 @@
+# Payment gateway (Mercado Pago)
+
+Design: `docs/adr/0003-mercado-pago-provider.md`. Background and sandbox results: `docs/rfc/0001-*.md`.
+
+## Rules
+- The SDK is imported only in `internal/payment/mercadopago`. The domain, the service and the handlers use `payment.Gateway` and its own types.
+- Never call the gateway inside a database transaction. Read the work, call the gateway, then record the result in a short transaction.
+- Every status change from the gateway goes through `Service.ApplyGatewayPayment` (row lock, guarded transition, saga event in the same transaction). Do not set a gateway payment status anywhere else.
+- Only one replica runs a worker pass at a time: `WorkLock` (a Postgres advisory lock, `internal/pkg/db/postgres/advisory_lock.go`) is taken without waiting at the start of `ProcessGatewayWork`. It is a session lock, not a transaction, so it does not break the rule above. Do not remove it: two replicas opening the checkout of one payment leave a second payable preference. it needs a connection in session mode (a pooler in transaction mode, such as PgBouncer, would lose it). A pass is bounded by `gatewayPassTimeout`, checks the lock is still held before each step (`gateway_worker_passes_total{result="lost"}`) and releases it even when its context is cancelled. A failed lock query discards its connection, since the server may have granted the lock before the answer was lost.
+- Reconciliation and closing work on every payment, with or without a stored `external_id`: the gateway may hold a checkout whose creation answer was lost. Closing a payment with no `external_id` asks the gateway for its checkout (`FindCheckout`) before marking it closed.
+- An approved gateway payment that cannot settle a payment (late: the payment is `CANCELLED`/`REJECTED`; extra: another payment already settled it) is never applied: `applyLocked` records it in `unsettled_payment` in the same transaction and the worker refunds it. Do not publish a saga event for it. A different amount is not refunded automatically.
+- Read the payment at the gateway **before** asking for a refund, for the saga refunds and for the unsettled ones: a refund already made from the seller's panel must close the record even while the refund request keeps being refused (the sandbox answers `401`, which counts as transient).
+- An approved payment with another amount is not refunded by the worker: it is recorded in `unsettled_payment` with status `REVIEW` (once, however many times it is seen) for a person.
+- Keep calls idempotent: refund `refund-<gateway payment id>`. Mercado Pago ignores the key when it creates a preference, so `CreateCheckout` first searches an open preference with the same `external_reference` (the search sees a new one after about 3 s) and the key `checkout-<payment id>` is only a precaution.
+- A rejected token must be retried, never fail a payment: 401, 403 and the search's 400 `invalid_token` are transient.
+- Settle against `transaction_amount` (the price). Installment interest is the buyer's and is not part of it.
+- The contract has one failure reason, `PAYMENT_REJECTED`. A new message or reason needs the contract and the fixtures in `testdata/contracts/` changed in every service.
+- The internal modes (`manual`, `auto-approve`, `auto-reject`) and their tests must keep passing unchanged.
+- The webhook is public: verify the signature first, never trust the body for payment data, answer 5xx so the gateway retries.
+- Never log the access token, the webhook secret, the notification body or the payer data. Tests and CI never call Mercado Pago (fake SDK requester).
+
+## Sandbox facts
+- Use `init_point`, not `sandbox_init_point`.
+- Both buyer and seller must be test users of the same country.
+- Cardholder names change the outcome: `APRO` approved, `OTHE` rejected, `CONT` in process.

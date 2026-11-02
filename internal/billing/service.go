@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/budget"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/db"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/logger"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/messaging"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/metrics"
 	"go.uber.org/zap"
 )
 
@@ -23,6 +25,14 @@ type Service struct {
 	payments payment.Repository
 	provider payment.PaymentProvider
 	newID    func() string
+	now      func() time.Time
+
+	// gateway is set only in mercadopago mode (see WithGateway); the internal modes leave it nil.
+	gateway         payment.Gateway
+	notificationURL string
+	checkoutTTL     time.Duration
+	workLock        WorkLock
+	retry           retryState
 }
 
 func NewService(
@@ -32,7 +42,7 @@ func NewService(
 	provider payment.PaymentProvider,
 	newID func() string,
 ) *Service {
-	return &Service{db: database, budgets: budgets, payments: payments, provider: provider, newID: newID}
+	return &Service{db: database, budgets: budgets, payments: payments, provider: provider, newID: newID, now: time.Now}
 }
 
 // RegisterHandlers binds the saga commands to the consumer.
@@ -136,10 +146,19 @@ func (s *Service) RequestPayment(ctx context.Context, tx *sql.Tx, env messaging.
 		SagaID:         env.SagaID,
 		Amount:         amount,
 		Status:         payment.StatusPending,
-		Provider:       payment.ProviderName,
+		Provider:       s.providerName(),
+	}
+	if s.gateway != nil {
+		expires := s.now().Add(s.checkoutTTL)
+		pay.ExpiresAt = &expires
 	}
 	if err := s.payments.Create(ctx, tx, pay); err != nil {
 		return err
+	}
+	if s.gateway != nil {
+		// The checkout is opened by the gateway worker once this transaction has committed: a remote
+		// call must not hold the database transaction (ADR 0002).
+		return nil
 	}
 
 	outcome, err := s.provider.Charge(ctx, *pay)
@@ -175,11 +194,25 @@ func (s *Service) RefundPayment(ctx context.Context, tx *sql.Tx, env messaging.E
 	if err != nil {
 		return err
 	}
+	// Lock the row: the webhook and the worker may be changing the same payment.
+	if pay, err = s.payments.FindByIDForUpdate(ctx, tx, pay.ID); err != nil {
+		return err
+	}
 
 	switch pay.Status {
 	case payment.StatusPending:
+		// For a gateway payment the worker closes the checkout (and cancels an in-process gateway payment).
 		return s.setStatus(ctx, tx, pay, payment.StatusCancelled)
 	case payment.StatusApproved:
+		if pay.Provider == payment.ProviderMercadoPago {
+			// Refund at the gateway first; PaymentRefunded is published only when the gateway confirms it.
+			if pay.RefundRequestedAt == nil {
+				requested := s.now()
+				pay.RefundRequestedAt = &requested
+				return s.payments.Update(ctx, tx, pay)
+			}
+			return nil
+		}
 		if err := pay.Transition(payment.StatusRefunded); err != nil {
 			return err
 		}
@@ -213,9 +246,12 @@ func (s *Service) decide(ctx context.Context, paymentID, requestID string, to pa
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	pay, err := s.payments.FindByID(ctx, tx, paymentID)
+	pay, err := s.payments.FindByIDForUpdate(ctx, tx, paymentID)
 	if err != nil {
 		return err
+	}
+	if pay.GatewayManaged() {
+		return payment.ErrGatewayManaged
 	}
 	if err := s.setStatus(ctx, tx, pay, to); err != nil {
 		return err
@@ -232,7 +268,11 @@ func (s *Service) decide(ctx context.Context, paymentID, requestID string, to pa
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	metrics.PaymentStatusChanges.WithLabelValues(string(to), "manual").Inc()
+	return nil
 }
 
 // GetBudget returns the GENERATED budget of a service order.

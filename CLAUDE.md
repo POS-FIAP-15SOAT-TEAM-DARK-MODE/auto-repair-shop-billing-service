@@ -29,6 +29,7 @@ Types: `feat fix refactor test chore docs perf style revert` — scopes in `.ai/
 | New feature or domain change | `.ai/rules/architecture.md` · `.ai/rules/domain.md` · `.ai/rules/go-conventions.md` |
 | Database schema or migration | `.ai/rules/database.md` · `.ai/rules/go-conventions.md` |
 | API endpoint | `.ai/rules/api.md` · `.ai/rules/architecture.md` · `.ai/rules/security.md` |
+| Payment gateway or Mercado Pago | `.ai/rules/payment-gateway.md` · `.ai/rules/domain.md` · `.ai/rules/security.md` |
 | Auth, RBAC, or security | `.ai/rules/security.md` · `.ai/rules/domain.md` |
 | Tests | `.ai/rules/testing.md` · `.ai/rules/architecture.md` |
 | Logging or observability | `.ai/rules/observability.md` · `.ai/rules/security.md` |

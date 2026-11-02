@@ -34,7 +34,7 @@ func Error(err error) (int, errorResponse) {
 func ShouldLog(err error, status int) bool {
 	switch status {
 	case http.StatusConflict:
-		return !errors.Is(err, payment.ErrInvalidTransition)
+		return !errors.Is(err, payment.ErrInvalidTransition) && !errors.Is(err, payment.ErrGatewayManaged)
 	case http.StatusUnprocessableEntity:
 		return true
 	default:
@@ -47,6 +47,8 @@ func getHTTPStatus(err error) int {
 	switch {
 	case isValidationError(err):
 		return http.StatusBadRequest
+	case errors.Is(err, payment.ErrInvalidSignature):
+		return http.StatusUnauthorized
 	case isNotFoundError(err):
 		return http.StatusNotFound
 	case isInternalServerError(err):
@@ -75,10 +77,12 @@ func buildErrorMessages(err error, status int) ([]string, string) {
 	switch status {
 	case http.StatusBadRequest:
 		return validationMessages(err), ""
+	case http.StatusUnauthorized:
+		return nil, "Unauthorized"
 	case http.StatusNotFound:
 		return nil, domainMessage(err, msgNotFound, budget.ErrNotFound, payment.ErrNotFound)
 	case http.StatusConflict:
-		return nil, domainMessage(err, msgConflict, payment.ErrInvalidTransition)
+		return nil, domainMessage(err, msgConflict, payment.ErrInvalidTransition, payment.ErrGatewayManaged)
 	case http.StatusUnprocessableEntity:
 		return nil, msgInvalidData
 	default:
@@ -99,7 +103,7 @@ func domainMessage(err error, fallback string, sentinels ...error) string {
 
 // validationErrors are the input-validation sentinels: they answer 400 and their
 // messages go to errors[]. JSON decoding errors and the domain validation errors
-// (budget and billing payload) share the list.
+// (budget, billing payload and the gateway notification) share the list.
 var validationErrors = []error{
 	jsonv2.ErrJSONSyntax,
 	jsonv2.ErrJSONType,
@@ -111,6 +115,7 @@ var validationErrors = []error{
 	budget.ErrNegativePrice,
 	budget.ErrInvalidQuantity,
 	billing.ErrInvalidPayload,
+	payment.ErrInvalidNotification,
 }
 
 func isValidationError(err error) bool {
@@ -143,7 +148,8 @@ func isNotFoundError(err error) bool {
 func isConflictError(err error) bool {
 	return errors.Is(err, app.ErrDataConflict) ||
 		errors.Is(err, app.ErrInfraConflict) ||
-		errors.Is(err, payment.ErrInvalidTransition)
+		errors.Is(err, payment.ErrInvalidTransition) ||
+		errors.Is(err, payment.ErrGatewayManaged)
 }
 
 func isUnprocessableEntityError(err error) bool {

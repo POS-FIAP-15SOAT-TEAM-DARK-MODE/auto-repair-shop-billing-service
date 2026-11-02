@@ -27,6 +27,10 @@ func TestError_StatusMapping(t *testing.T) {
 		{"data conflict", app.ErrDataConflict, http.StatusConflict, "conflict"},
 		{"data violation", app.ErrDataViolation, http.StatusUnprocessableEntity, "invalid data"},
 		{"json syntax", jsonv2.ErrJSONSyntax, http.StatusBadRequest, ""},
+		{"gateway managed payment", payment.ErrGatewayManaged, http.StatusConflict, payment.ErrGatewayManaged.Error()},
+		{"invalid webhook signature", payment.ErrInvalidSignature, http.StatusUnauthorized, "Unauthorized"},
+		{"invalid webhook notification", payment.ErrInvalidNotification, http.StatusBadRequest, payment.ErrInvalidNotification.Error()},
+		{"gateway failure the gateway must retry", &payment.GatewayError{Transient: true, Err: errors.New("down")}, http.StatusInternalServerError, "internal server error"},
 		{"unknown", errors.New("boom"), http.StatusInternalServerError, "internal server error"},
 	}
 	for _, tc := range cases {
@@ -78,6 +82,7 @@ func TestShouldLog(t *testing.T) {
 	assert.True(t, ShouldLog(app.ErrDataConflict, http.StatusConflict))
 	assert.True(t, ShouldLog(app.ErrDataViolation, http.StatusUnprocessableEntity))
 	assert.False(t, ShouldLog(payment.ErrInvalidTransition, http.StatusConflict))
+	assert.False(t, ShouldLog(payment.ErrGatewayManaged, http.StatusConflict), "a refused manual decision is a domain answer, not a failure")
 	assert.False(t, ShouldLog(budget.ErrNotFound, http.StatusNotFound))
 	assert.False(t, ShouldLog(jsonv2.ErrJSONSyntax, http.StatusBadRequest))
 }

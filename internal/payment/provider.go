@@ -27,6 +27,8 @@ const (
 	ModeManual      Mode = "manual"
 	ModeAutoApprove Mode = "auto-approve"
 	ModeAutoReject  Mode = "auto-reject"
+	// ModeMercadoPago charges through Mercado Pago (Checkout Pro). The internal provider is not used.
+	ModeMercadoPago Mode = "mercadopago"
 )
 
 // ParseMode maps PAYMENT_MODE to a Mode. Empty means manual.
@@ -34,7 +36,7 @@ func ParseMode(s string) (Mode, error) {
 	switch Mode(s) {
 	case "":
 		return ModeManual, nil
-	case ModeManual, ModeAutoApprove, ModeAutoReject:
+	case ModeManual, ModeAutoApprove, ModeAutoReject, ModeMercadoPago:
 		return Mode(s), nil
 	default:
 		return "", fmt.Errorf("invalid PAYMENT_MODE %q", s)

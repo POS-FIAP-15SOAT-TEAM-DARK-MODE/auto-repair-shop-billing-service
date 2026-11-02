@@ -41,6 +41,10 @@ func SetupRouter(c *container.HandlersWrapper, m *container.Middlewares) *gin.En
 	v1.GET("/payments/:serviceOrderId", middleware.Auth(auth.AttendantRoles...), GinHandler(c.Billing.GetPayment))
 	v1.POST("/payments/:id/confirm", middleware.Auth(auth.AttendantRoles...), GinOnlyErrorHandler(c.Billing.Confirm, http2.StatusNoContent))
 	v1.POST("/payments/:id/reject", middleware.Auth(auth.AttendantRoles...), GinOnlyErrorHandler(c.Billing.Reject, http2.StatusNoContent))
+	if c.Billing.WebhookEnabled() {
+		// Public on purpose: the gateway calls it and the only authentication is the x-signature header.
+		v1.POST("/webhooks/mercadopago", GinHandler(c.Billing.Webhook))
+	}
 
 	return router
 }

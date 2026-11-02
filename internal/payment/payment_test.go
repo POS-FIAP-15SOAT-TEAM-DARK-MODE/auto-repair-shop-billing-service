@@ -45,7 +45,7 @@ func TestTransition_RepeatedIsRejected(t *testing.T) {
 }
 
 func TestParseMode(t *testing.T) {
-	for in, want := range map[string]Mode{"": ModeManual, "manual": ModeManual, "auto-approve": ModeAutoApprove, "auto-reject": ModeAutoReject} {
+	for in, want := range map[string]Mode{"": ModeManual, "manual": ModeManual, "auto-approve": ModeAutoApprove, "auto-reject": ModeAutoReject, "mercadopago": ModeMercadoPago} {
 		got, err := ParseMode(in)
 		require.NoError(t, err, in)
 		assert.Equal(t, want, got)

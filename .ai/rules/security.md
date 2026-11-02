@@ -7,7 +7,7 @@ This service issues no tokens and stores no credentials. Tokens are issued by th
 - Signature: HS256 with `JWT_SECRET`. The code falls back to a placeholder when the variable is empty (`internal/pkg/auth/jwt.go`); production must always set it.
 - Claims used: `user_id` and `roles` (array). The customer check compares `user_id` with `budget.customer_user_id`.
 - The middleware makes no DB call; it relies only on the JWT payload.
-- Public endpoints: `/ping`, `/metrics`, `/swagger/*`, `/swagger.yaml`.
+- Public endpoints: `/ping`, `/metrics`, `/swagger/*`, `/swagger.yaml` and, only in `mercadopago` mode, `POST /v1/webhooks/mercadopago`, which is authenticated by its `x-signature` header (see `payment-gateway.md`).
 
 ## RBAC Enforcement
 - Each route declares its roles with `middleware.Auth(...)` in `internal/app/routing/routing.go`. A token without any listed role → 403.
