@@ -73,6 +73,11 @@ func (g *Gateway) CreateCheckout(ctx context.Context, req payment.CheckoutReques
 	return payment.Checkout{ExternalID: resp.ID, URL: resp.InitPoint}, nil
 }
 
+// FindCheckout returns the open checkout of the payment (see findOpenCheckout).
+func (g *Gateway) FindCheckout(ctx context.Context, paymentID string) (payment.Checkout, bool, error) {
+	return g.findOpenCheckout(ctx, paymentID)
+}
+
 // findOpenCheckout returns the newest preference of the payment that has not expired yet. A preference
 // closed by ExpireCheckout has a past expiration date, so it is not reused.
 func (g *Gateway) findOpenCheckout(ctx context.Context, paymentID string) (payment.Checkout, bool, error) {

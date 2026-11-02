@@ -24,6 +24,9 @@ func (s stubGateway) FindPayments(context.Context, string) ([]payment.GatewayPay
 func (s stubGateway) GetPayment(context.Context, string) (payment.GatewayPayment, error) {
 	return payment.GatewayPayment{ID: "1"}, s.err
 }
+func (s stubGateway) FindCheckout(context.Context, string) (payment.Checkout, bool, error) {
+	return payment.Checkout{ExternalID: "pref"}, true, s.err
+}
 func (s stubGateway) Refund(context.Context, string) error         { return s.err }
 func (s stubGateway) CancelPayment(context.Context, string) error  { return s.err }
 func (s stubGateway) ExpireCheckout(context.Context, string) error { return s.err }
@@ -37,6 +40,7 @@ func TestInstrument_CountsEveryOperationByOutcomeAndKeepsTheResults(t *testing.T
 	call := map[string]func(payment.Gateway) error{
 		"create_checkout": func(g payment.Gateway) error { _, err := g.CreateCheckout(ctx, payment.CheckoutRequest{}); return err },
 		"find_payments":   func(g payment.Gateway) error { _, err := g.FindPayments(ctx, "x"); return err },
+		"find_checkout":   func(g payment.Gateway) error { _, _, err := g.FindCheckout(ctx, "x"); return err },
 		"get_payment":     func(g payment.Gateway) error { _, err := g.GetPayment(ctx, "1"); return err },
 		"refund":          func(g payment.Gateway) error { return g.Refund(ctx, "1") },
 		"cancel_payment":  func(g payment.Gateway) error { return g.CancelPayment(ctx, "1") },

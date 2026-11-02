@@ -42,6 +42,9 @@ type Gateway interface {
 	Refund(ctx context.Context, gatewayPaymentID string) error
 	// CancelPayment cancels a gateway payment that is not approved yet.
 	CancelPayment(ctx context.Context, gatewayPaymentID string) error
+	// FindCheckout returns the open checkout of a payment, found by its external reference. It is how a
+	// checkout is recovered when its creation went through but the answer was lost before it was stored.
+	FindCheckout(ctx context.Context, paymentID string) (Checkout, bool, error)
 	// ExpireCheckout makes the checkout unpayable.
 	ExpireCheckout(ctx context.Context, externalID string) error
 }

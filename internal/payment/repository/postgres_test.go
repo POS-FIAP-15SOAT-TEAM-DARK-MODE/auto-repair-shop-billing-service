@@ -149,7 +149,7 @@ func TestPostgres_ListWork(t *testing.T) {
 		args  []driver.Value
 	}{
 		{payment.WorkCreateCheckout, "status = 'PENDING' AND external_id IS NULL", []driver.Value{20}},
-		{payment.WorkReconcile, "status = 'PENDING' AND external_id IS NOT NULL AND \\(last_checked_at IS NULL", []driver.Value{20, now.Add(-payment.ReconcileEvery)}},
+		{payment.WorkReconcile, "status = 'PENDING' AND \\(last_checked_at IS NULL", []driver.Value{20, now.Add(-payment.ReconcileEvery)}},
 		{payment.WorkExpire, "expires_at < \\$2", []driver.Value{20, now}},
 		{payment.WorkRefund, "status = 'APPROVED' AND refund_requested_at IS NOT NULL", []driver.Value{20}},
 		{payment.WorkCloseCheckout, "checkout_closed_at IS NULL", []driver.Value{20}},

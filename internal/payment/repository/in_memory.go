@@ -105,14 +105,14 @@ func matchesWork(p *payment.Payment, kind payment.WorkKind, now time.Time) bool 
 	case payment.WorkCreateCheckout:
 		return p.Status == payment.StatusPending && p.ExternalID == ""
 	case payment.WorkReconcile:
-		return p.Status == payment.StatusPending && p.ExternalID != ""
+		return p.Status == payment.StatusPending // with or without a checkout: the gateway may hold one we never stored
 	case payment.WorkExpire:
 		return p.Status == payment.StatusPending && p.ExpiresAt != nil && p.ExpiresAt.Before(now)
 	case payment.WorkRefund:
 		return p.Status == payment.StatusApproved && p.RefundRequestedAt != nil
 	case payment.WorkCloseCheckout:
 		finished := p.Status == payment.StatusRejected || p.Status == payment.StatusCancelled || p.Status == payment.StatusRefunded
-		return finished && p.ExternalID != "" && p.CheckoutClosedAt == nil
+		return finished && p.CheckoutClosedAt == nil
 	}
 	return false
 }

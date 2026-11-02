@@ -26,11 +26,15 @@ type fakeGateway struct {
 	createErr error
 	created   []payment.CheckoutRequest
 
-	found   []payment.GatewayPayment
-	finds   int
-	findErr error
-	byID    map[string]payment.GatewayPayment
-	getErr  error
+	found []payment.GatewayPayment
+	finds int
+
+	openCheckout    *payment.Checkout // what FindCheckout answers; nil means none
+	findCheckoutErr error
+	findCheckouts   int
+	findErr         error
+	byID            map[string]payment.GatewayPayment
+	getErr          error
 
 	refundErr error
 	refunded  []string
@@ -47,6 +51,13 @@ func (f *fakeGateway) CreateCheckout(_ context.Context, r payment.CheckoutReques
 func (f *fakeGateway) FindPayments(context.Context, string) ([]payment.GatewayPayment, error) {
 	f.finds++
 	return append([]payment.GatewayPayment(nil), f.found...), f.findErr
+}
+func (f *fakeGateway) FindCheckout(context.Context, string) (payment.Checkout, bool, error) {
+	f.findCheckouts++
+	if f.openCheckout == nil {
+		return payment.Checkout{}, false, f.findCheckoutErr
+	}
+	return *f.openCheckout, true, f.findCheckoutErr
 }
 func (f *fakeGateway) GetPayment(_ context.Context, id string) (payment.GatewayPayment, error) {
 	return f.byID[id], f.getErr
@@ -1183,5 +1194,67 @@ func TestGateway_MetricsPublishTheRefundBacklog(t *testing.T) {
 	empty.svc.ProcessGatewayWork(context.Background())
 	assert.Equal(t, 0.0, testutil.ToFloat64(metrics.RefundsPending))
 	assert.Equal(t, 0.0, testutil.ToFloat64(metrics.RefundsPendingOldestAge), "no refund waiting, no age")
+	g.assertDB()
+}
+
+// ---- a checkout whose creation went through but was never stored ----
+
+func TestGateway_AnApprovalOnACheckoutThatWasNeverStoredIsStillFound(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(nil) // no external_id: the answer of CreateCheckout was lost
+	g.gw.createErr = transient
+	g.gw.found = []payment.GatewayPayment{gp("1001", "approved", "221")}
+
+	g.tx(1)
+
+	g.svc.ProcessGatewayWork(context.Background()) // the creation fails, and the same pass still reconciles
+
+	got := g.reload()
+	assert.Equal(t, payment.StatusApproved, got.Status, "reconciliation looks by external reference, with or without a stored checkout")
+	assert.Equal(t, "1001", got.GatewayPaymentID)
+	g.assertDB()
+}
+
+func TestGateway_ClosingAPaymentWithoutAStoredCheckoutExpiresTheOneTheGatewayHolds(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) { p.Status = payment.StatusCancelled }) // cancelled before any checkout was stored
+	g.gw.openCheckout = &payment.Checkout{ExternalID: "pref-orphan", URL: "https://mp/orphan"}
+	g.tx(0)
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, 1, g.gw.findCheckouts)
+	assert.Equal(t, []string{"pref-orphan"}, g.gw.expired, "the payable checkout nobody stored is closed")
+	assert.NotNil(t, g.reload().CheckoutClosedAt)
+	g.assertDB()
+}
+
+func TestGateway_ClosingAPaymentThatHasNoCheckoutAnywhereJustMarksItClosed(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) { p.Status = payment.StatusRejected })
+	g.tx(0)
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Empty(t, g.gw.expired)
+	assert.NotNil(t, g.reload().CheckoutClosedAt)
+	g.assertDB()
+}
+
+func TestGateway_ClosingRetriesWhenTheGatewayCannotBeAskedForTheCheckout(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) { p.Status = payment.StatusCancelled })
+	g.gw.findCheckoutErr = transient
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Nil(t, g.reload().CheckoutClosedAt, "a transient failure is retried: the checkout may still be payable")
+	assert.Empty(t, g.gw.expired)
+
+	g.now = g.now.Add(time.Minute)
+	g.gw.findCheckoutErr = permanent // refused for good: nothing more can be done, so it is closed
+	g.tx(0)
+	g.svc.ProcessGatewayWork(context.Background())
+	assert.NotNil(t, g.reload().CheckoutClosedAt)
 	g.assertDB()
 }

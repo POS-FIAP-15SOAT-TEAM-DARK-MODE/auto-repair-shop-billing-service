@@ -60,7 +60,7 @@ func (r *Postgres) ListWork(ctx context.Context, ex db.Executor, kind payment.Wo
 	case payment.WorkCreateCheckout:
 		query = workPrefix + `status = 'PENDING' AND external_id IS NULL` + workSuffix
 	case payment.WorkReconcile:
-		query = workPrefix + `status = 'PENDING' AND external_id IS NOT NULL AND (last_checked_at IS NULL OR last_checked_at < $2)` + workSuffix
+		query = workPrefix + `status = 'PENDING' AND (last_checked_at IS NULL OR last_checked_at < $2)` + workSuffix
 		args = append(args, now.Add(-payment.ReconcileEvery))
 	case payment.WorkExpire:
 		query = workPrefix + `status = 'PENDING' AND expires_at IS NOT NULL AND expires_at < $2` + workSuffix
@@ -68,7 +68,7 @@ func (r *Postgres) ListWork(ctx context.Context, ex db.Executor, kind payment.Wo
 	case payment.WorkRefund:
 		query = workPrefix + `status = 'APPROVED' AND refund_requested_at IS NOT NULL` + workSuffix
 	case payment.WorkCloseCheckout:
-		query = workPrefix + `status IN ('REJECTED', 'CANCELLED', 'REFUNDED') AND external_id IS NOT NULL AND checkout_closed_at IS NULL` + workSuffix
+		query = workPrefix + `status IN ('REJECTED', 'CANCELLED', 'REFUNDED') AND checkout_closed_at IS NULL` + workSuffix
 	default:
 		return nil, fmt.Errorf("unknown work kind %q", kind)
 	}

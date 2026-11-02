@@ -272,3 +272,20 @@ func queryOf(c recorded) map[string]string {
 	}
 	return out
 }
+
+func TestFindCheckout_ReturnsTheOpenPreferenceOfThePayment(t *testing.T) {
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	g, _ := newGateway(t, map[string]answer{
+		"GET /checkout/preferences/search": {200, `{"total":1,"elements":[{"id":"pref-1","external_reference":"pay-1","date_created":"2026-11-02T10:00:00Z","expiration_date_to":"` + future + `"}]}`},
+		"GET /checkout/preferences/pref-1": {200, `{"id":"pref-1","init_point":"https://mp/init"}`},
+	})
+	co, found, err := g.FindCheckout(context.Background(), "pay-1")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, payment.Checkout{ExternalID: "pref-1", URL: "https://mp/init"}, co)
+
+	g, _ = newGateway(t, nil) // the default answer: no preference
+	_, found, err = g.FindCheckout(context.Background(), "pay-2")
+	require.NoError(t, err)
+	assert.False(t, found)
+}

@@ -47,6 +47,11 @@ func (i *instrumented) GetPayment(ctx context.Context, id string) (gp payment.Ga
 	return gp, err
 }
 
+func (i *instrumented) FindCheckout(ctx context.Context, paymentID string) (co payment.Checkout, found bool, err error) {
+	err = observe("find_checkout", func() error { co, found, err = i.next.FindCheckout(ctx, paymentID); return err })
+	return co, found, err
+}
+
 func (i *instrumented) Refund(ctx context.Context, id string) error {
 	return observe("refund", func() error { return i.next.Refund(ctx, id) })
 }

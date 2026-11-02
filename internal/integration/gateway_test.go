@@ -91,6 +91,9 @@ func (g *memGateway) CancelPayment(_ context.Context, id string) error {
 	g.payments[id] = p
 	return nil
 }
+func (g *memGateway) FindCheckout(context.Context, string) (payment.Checkout, bool, error) {
+	return payment.Checkout{}, false, nil
+}
 func (g *memGateway) ExpireCheckout(context.Context, string) error { return nil }
 
 type gwEnv struct {

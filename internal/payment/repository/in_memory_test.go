@@ -55,6 +55,7 @@ func TestInMemory_UpdateKeepsTheGatewayFieldsAndListWorkFilters(t *testing.T) {
 	require.NoError(t, repo.Create(ctx, nil, expired))
 	require.NoError(t, repo.Create(ctx, nil, mp("paid", payment.StatusApproved)))
 	require.NoError(t, repo.Create(ctx, nil, mp("done", payment.StatusRejected)))
+	require.NoError(t, repo.Create(ctx, nil, mp("lost", payment.StatusCancelled))) // cancelled before any checkout was stored
 
 	open, _ := repo.FindByID(ctx, nil, "open")
 	open.ExternalID, open.CheckoutURL = "pref-open", "https://mp/open"
@@ -77,10 +78,10 @@ func TestInMemory_UpdateKeepsTheGatewayFieldsAndListWorkFilters(t *testing.T) {
 	}
 	assert.Equal(t, []string{"new", "expired"}, ids(payment.WorkCreateCheckout, 0))
 	assert.Equal(t, []string{"new"}, ids(payment.WorkCreateCheckout, 1))
-	assert.Equal(t, []string{"open"}, ids(payment.WorkReconcile, 0))
+	assert.Equal(t, []string{"new", "open", "expired"}, ids(payment.WorkReconcile, 0), "with or without a stored checkout: the gateway may hold one")
 	assert.Equal(t, []string{"expired"}, ids(payment.WorkExpire, 0))
 	assert.Equal(t, []string{"paid"}, ids(payment.WorkRefund, 0))
-	assert.Equal(t, []string{"done"}, ids(payment.WorkCloseCheckout, 0))
+	assert.Equal(t, []string{"done", "lost"}, ids(payment.WorkCloseCheckout, 0), "a payment with no stored checkout is closed too")
 	assert.Empty(t, ids(payment.WorkKind("NOPE"), 0))
 
 	got, _ := repo.FindByIDForUpdate(ctx, nil, "paid")

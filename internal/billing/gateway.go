@@ -232,17 +232,22 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 		}
 		for _, p := range list {
 			key := string(step.kind) + ":" + p.ID
+			// last_checked_at orders the reconciliation and the other steps. The creation of a checkout never
+			// stamps it: a payment whose creation keeps failing (or that was just created) must still be
+			// reconciled, since the gateway may already hold a checkout whose answer was lost.
+			stamps := step.kind != payment.WorkCreateCheckout
 			if !s.retry.ready(key, now) {
 				// a payment waiting for its backoff goes to the back of the line, or it would keep a slot of every batch
-				if err := s.payments.MarkChecked(ctx, s.db, p.ID, now); err != nil {
-					logger.Of(ctx).Error(err, zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", string(step.kind)), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID))
+				if stamps {
+					if err := s.payments.MarkChecked(ctx, s.db, p.ID, now); err != nil {
+						logger.Of(ctx).Error(err, zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", string(step.kind)), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID))
+					}
 				}
 				continue
 			}
 			err := step.run(ctx, p)
-			// Stamp every look, so the next pass starts with the payments seen least recently. A checkout
-			// just opened is not stamped: its first reconciliation should not wait.
-			if step.kind != payment.WorkCreateCheckout || err != nil {
+			// Stamp every look, so the next pass starts with the payments seen least recently.
+			if stamps {
 				if markErr := s.payments.MarkChecked(ctx, s.db, p.ID, now); markErr != nil {
 					logger.Of(ctx).Error(markErr, zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", string(step.kind)), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID))
 				}
@@ -478,8 +483,23 @@ func (s *Service) closeCheckout(ctx context.Context, p *payment.Payment) error {
 			return err
 		}
 	}
-	if err := s.gateway.ExpireCheckout(ctx, p.ExternalID); err != nil && payment.IsTransient(err) {
-		return err
+	externalID := p.ExternalID
+	if externalID == "" {
+		// No checkout was stored, but the gateway may hold one whose answer was lost: look for it.
+		co, found, err := s.gateway.FindCheckout(ctx, p.ID)
+		switch {
+		case err != nil && payment.IsTransient(err):
+			return err
+		case err != nil:
+			logger.Of(ctx).Error(err, zap.String("event", "gateway.worker_step_failed"), zap.String("component", "gateway-worker"), zap.String("step", "CLOSE_CHECKOUT"), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID), zap.Bool("transient", false))
+		case found:
+			externalID = co.ExternalID
+		}
+	}
+	if externalID != "" {
+		if err := s.gateway.ExpireCheckout(ctx, externalID); err != nil && payment.IsTransient(err) {
+			return err
+		}
 	}
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		pay, err := s.payments.FindByIDForUpdate(ctx, tx, p.ID)

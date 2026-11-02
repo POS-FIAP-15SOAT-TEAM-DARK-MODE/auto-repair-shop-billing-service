@@ -35,7 +35,7 @@ Registered in `internal/pkg/metrics` and served at `/metrics`.
 - `http_request_duration_seconds` (method, route, status)
 - `outbox_pending` (gauge): outbox rows not yet published, refreshed by the relay on every tick.
 - `payment_status_changes_total{to,source}` — payments that changed status; `source` is `gateway` (webhook, reconciliation, refund), `worker` (expiry, refused checkout) or `manual` (attendant).
-- `gateway_requests_total{op,outcome}` and `gateway_request_duration_seconds{op}` — calls to Mercado Pago (`create_checkout`, `find_payments`, `get_payment`, `refund`, `cancel_payment`, `expire_checkout`; outcome `ok`, `transient`, `permanent`). Watch `permanent` and a rising `transient` (a rejected token shows up here).
+- `gateway_requests_total{op,outcome}` and `gateway_request_duration_seconds{op}` — calls to Mercado Pago (`create_checkout`, `find_payments`, `find_checkout`, `get_payment`, `refund`, `cancel_payment`, `expire_checkout`; outcome `ok`, `transient`, `permanent`). Watch `permanent` and a rising `transient` (a rejected token shows up here).
 - `gateway_worker_passes_total{result}` — passes of the gateway worker: `ran`, `skipped` (another replica holds the work lock; normal on all but one replica) or `error` (the lock could not be asked). Alert if no replica reports `ran`.
 - `gateway_worker_errors_total{step,kind}` — failed worker steps; waiting for the gateway is not an error.
 - `payments_pending` and `payments_pending_oldest_age_seconds` — Mercado Pago payments waiting; refreshed every worker pass. An age above the checkout lifetime means expiry is stuck.

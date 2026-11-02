@@ -72,6 +72,11 @@ not hold the database transaction of a command. The saga, its message contracts 
   expiry does not cancel a payment the customer was charged for), while another matching approval is still
   applied. A checkout that never opened expires locally without asking the gateway. Only a 404 makes a
   notification "unknown" (200); other refusals make Mercado Pago retry.
+- A checkout whose creation went through but whose answer was lost (a crash or a timeout before its id was
+  stored) is not forgotten: the reconciliation looks for payments by external reference whether or not a
+  checkout is stored, a retried creation first reuses the open preference, and closing a payment that has no
+  stored checkout asks the gateway for it (`FindCheckout`) and expires what it finds. The creation step does
+  not stamp `last_checked_at`, so a payment whose creation keeps failing is still reconciled.
 - The replicas take turns: each worker pass starts with a Postgres advisory lock (`pg_try_advisory_lock`, no
   waiting). The replica that gets it runs the pass and the others skip it (`gateway_worker_passes_total`).
   Without it every replica would list the same payments, and two replicas opening the checkout of one
