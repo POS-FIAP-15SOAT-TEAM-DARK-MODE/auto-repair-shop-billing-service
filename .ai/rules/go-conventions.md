@@ -1,7 +1,7 @@
 # Go Conventions
 
 ## Tech Stack
-Go 1.26 · Gin · PostgreSQL 15 · `lib/pq` (raw SQL, no ORM) · `golang-migrate` · `golang-jwt/jwt/v5` · Zap · Testify · Mockery v2 · `shopspring/decimal` · `google/uuid` · `oklog/ulid/v2`
+Go 1.27 · Gin · PostgreSQL 15 · `lib/pq` (raw SQL, no ORM) · `golang-migrate` · `golang-jwt/jwt/v5` · Zap · Testify · Mockery v2 · `shopspring/decimal` · `google/uuid` · `oklog/ulid/v2`
 
 ## ID Types
 - `google/uuid` — all entity IDs except service orders.

@@ -1,6 +1,6 @@
 module github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service
 
-go 1.26.5
+go 1.27
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
