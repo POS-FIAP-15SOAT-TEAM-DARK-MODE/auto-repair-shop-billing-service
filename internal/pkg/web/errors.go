@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/app"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/billing"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/budget"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
 	jsonv2 "github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/json"
@@ -44,7 +45,7 @@ func ShouldLog(err error, status int) bool {
 // getHTTPStatus determines the HTTP status code for a given error.
 func getHTTPStatus(err error) int {
 	switch {
-	case isBadRequestError(err):
+	case isValidationError(err):
 		return http.StatusBadRequest
 	case isNotFoundError(err):
 		return http.StatusNotFound
@@ -73,7 +74,7 @@ const (
 func buildErrorMessages(err error, status int) ([]string, string) {
 	switch status {
 	case http.StatusBadRequest:
-		return unwrapAll(err), ""
+		return validationMessages(err), ""
 	case http.StatusNotFound:
 		return nil, domainMessage(err, msgNotFound, budget.ErrNotFound, payment.ErrNotFound)
 	case http.StatusConflict:
@@ -96,12 +97,36 @@ func domainMessage(err error, fallback string, sentinels ...error) string {
 	return fallback
 }
 
-func isBadRequestError(err error) bool {
-	return errors.Is(err, jsonv2.ErrJSONSyntax) ||
-		errors.Is(err, jsonv2.ErrJSONType) ||
-		errors.Is(err, jsonv2.ErrJSONUnexpectedEOF) ||
-		errors.Is(err, jsonv2.ErrJSONEmptyBody) ||
-		errors.Is(err, jsonv2.ErrWrongPayloadFormat)
+// validationErrors are the input-validation sentinels: they answer 400 and their
+// messages go to errors[]. JSON decoding errors and the domain validation errors
+// (budget and billing payload) share the list.
+var validationErrors = []error{
+	jsonv2.ErrJSONSyntax,
+	jsonv2.ErrJSONType,
+	jsonv2.ErrJSONUnexpectedEOF,
+	jsonv2.ErrJSONEmptyBody,
+	jsonv2.ErrWrongPayloadFormat,
+	budget.ErrCustomerRequired,
+	budget.ErrNoWorks,
+	budget.ErrNegativePrice,
+	budget.ErrInvalidQuantity,
+	billing.ErrInvalidPayload,
+}
+
+func isValidationError(err error) bool {
+	return len(validationMessages(err)) > 0
+}
+
+// validationMessages returns the messages of the validation sentinels that err matches.
+// Other causes wrapped in the same error are never included.
+func validationMessages(err error) []string {
+	var msgs []string
+	for _, s := range validationErrors {
+		if errors.Is(err, s) {
+			msgs = append(msgs, s.Error())
+		}
+	}
+	return msgs
 }
 
 func isInternalServerError(err error) bool {
@@ -123,22 +148,4 @@ func isConflictError(err error) bool {
 
 func isUnprocessableEntityError(err error) bool {
 	return errors.Is(err, app.ErrDataViolation)
-}
-
-func unwrapAll(err error) []string {
-	if err == nil {
-		return nil
-	}
-
-	type multiUnwrap interface {
-		Unwrap() []error
-	}
-	if m, ok := err.(multiUnwrap); ok {
-		var all []string
-		for _, e := range m.Unwrap() {
-			all = append(all, unwrapAll(e)...)
-		}
-		return all
-	}
-	return []string{err.Error()}
 }
