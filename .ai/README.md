@@ -15,6 +15,7 @@ Single source of truth for all AI agent rules in this project.
     api.md                 endpoint reference, error format, Swagger
     testing.md             coverage thresholds, unit/integration patterns
     security.md            JWT, RBAC enforcement, bcrypt, PII protection
+    payment-gateway.md     Mercado Pago provider: port, worker, webhook, idempotency, sandbox facts
     observability.md       Zap, log levels, event names, redaction
     workflow.md            Conventional Commits, pre-commit hooks, dev commands
   commands/            # reusable playbooks (also Claude Code slash commands via symlinks)
@@ -35,6 +36,7 @@ Single source of truth for all AI agent rules in this project.
 | API | `rules/api.md` | Endpoints with roles, error format, Swagger |
 | Testing | `rules/testing.md` | 90%/80% coverage, unit vs integration patterns |
 | Security | `rules/security.md` | JWT, RBAC, bcrypt, PII rules |
+| Payment gateway | `rules/payment-gateway.md` | Mercado Pago port, worker, webhook, idempotency |
 | Observability | `rules/observability.md` | Zap, log levels, event names, redaction |
 | Workflow | `rules/workflow.md` | Conventional Commits, pre-commit, dev commands |
 
@@ -45,6 +47,7 @@ Single source of truth for all AI agent rules in this project.
 | New feature or domain change | `architecture.md` · `domain.md` · `go-conventions.md` |
 | Database schema or migration | `database.md` · `go-conventions.md` |
 | API endpoint | `api.md` · `architecture.md` · `security.md` |
+| Payment gateway or Mercado Pago | `payment-gateway.md` · `domain.md` · `security.md` |
 | Auth, RBAC, or security | `security.md` · `domain.md` |
 | Tests | `testing.md` · `architecture.md` |
 | Logging or observability | `observability.md` · `security.md` |

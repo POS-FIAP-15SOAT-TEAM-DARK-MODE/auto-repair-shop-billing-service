@@ -9,8 +9,8 @@ Port `8083`, PostgreSQL database `billing`.
 |---|---|---|
 | `GenerateBudget` | creates the budget (dedupe if one is already `GENERATED`) | `BudgetGenerated` |
 | `CancelBudget` | `GENERATED` → `CANCELLED` | `BudgetCancelled` |
-| `RequestPayment` | creates a `PENDING` payment and charges it | `PaymentApproved` / `PaymentFailed` (none when pending) |
-| `RefundPayment` | `PENDING` → `CANCELLED`, `APPROVED` → `REFUNDED` | `PaymentRefunded` (only for `APPROVED → REFUNDED`) |
+| `RequestPayment` | creates a `PENDING` payment and charges it (in `mercadopago` mode it only records it; the worker opens the checkout) | `PaymentApproved` / `PaymentFailed` (none when pending) |
+| `RefundPayment` | `PENDING` → `CANCELLED`, `APPROVED` → `REFUNDED` (in `mercadopago` mode the refund is requested and `PaymentRefunded` is sent once Mercado Pago confirms it) | `PaymentRefunded` (only for `APPROVED → REFUNDED`) |
 
 Envelope and payloads: `testdata/contracts/*.json` (copied from `docs/fase4/contracts/messaging.md`).
 Invalid payloads return an error, so the message goes to the DLQ after 5 receives.
@@ -21,9 +21,22 @@ Invalid payloads return an error, so the message goes to the DLQ after 5 receive
 | `manual` (default) | stays `PENDING`; the attendant calls `confirm` or `reject` |
 | `auto-approve` | `APPROVED` → `PaymentApproved` |
 | `auto-reject` | `REJECTED` → `PaymentFailed` (drives the saga compensation) |
+| `mercadopago` | `PENDING` with a Mercado Pago checkout; the payment settles when Mercado Pago approves, rejects or the checkout expires |
 
-Adding Mercado Pago later means a new implementation of `payment.PaymentProvider`; see ADR 0002 for the
-transaction split it requires.
+### Mercado Pago mode
+`PAYMENT_MODE=mercadopago` charges through Checkout Pro. The attendant reads `checkout_url` from
+`GET /v1/payments/:serviceOrderId` and gives the link to the customer. Design: ADR 0003 (options and sandbox
+results: RFC 0001). The service refuses to start without the access token.
+
+| Variable | Meaning |
+|---|---|
+| `MERCADOPAGO_ACCESS_TOKEN` | required; the long `APP_USR-...` token of the seller (test) account |
+| `MERCADOPAGO_WEBHOOK_SECRET` | signs the webhook; empty rejects every webhook (payments then settle through the worker) |
+| `MERCADOPAGO_NOTIFICATION_URL` | public HTTPS URL of `POST /v1/webhooks/mercadopago`; empty means "do not send" |
+| `MERCADOPAGO_CHECKOUT_TTL` | lifetime of a checkout, default `48h` |
+| `GATEWAY_WORKER_INTERVAL` | how often the gateway worker runs, default `5s` |
+
+Tests use a fake SDK transport and never call Mercado Pago.
 
 ## REST API
 | Route | Roles |
@@ -32,6 +45,7 @@ transaction split it requires.
 | `GET /v1/payments/:serviceOrderId` | Attendant, Admin |
 | `POST /v1/payments/:id/confirm` | Attendant, Admin (204, 409, 404) |
 | `POST /v1/payments/:id/reject` | Attendant, Admin (204, 409, 404) |
+| `POST /v1/webhooks/mercadopago` | public, only in `mercadopago` mode; authenticated by the `x-signature` header |
 
 Swagger: `docs/swagger.yaml`, served at `/swagger/index.html` and `/swagger.yaml`.
 

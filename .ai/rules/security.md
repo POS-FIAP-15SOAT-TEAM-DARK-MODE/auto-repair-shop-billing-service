@@ -2,7 +2,7 @@
 
 ## JWT
 - All protected endpoints require `Authorization: Bearer <JWT>` — return 401 if missing/invalid.
-- Public endpoints (no auth): `POST /v1/auth/login` and the ping endpoint only.
+- Public endpoints (no JWT): the ping endpoint and, only in `mercadopago` mode, `POST /v1/webhooks/mercadopago`, which is authenticated by its `x-signature` header (see `payment-gateway.md`).
 - JWT payload must include: `user_id` and `roles` (array). CUSTOMER access to a budget is checked against `user_id` == `budget.customer_user_id`.
 - Auth middleware must not make extra DB calls — rely entirely on the JWT payload.
 - Expiry configurable via `JWT_EXPIRES_IN` env var.

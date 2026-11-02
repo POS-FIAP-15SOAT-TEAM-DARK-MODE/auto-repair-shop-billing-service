@@ -6,6 +6,9 @@ metadata:
     app: billing-service
 # Non-sensitive runtime config (mirrors .env). Sensitive values live in
 # billing-service-secrets. Overlays set POSTGRES_HOST (RDS endpoint) and PAYMENT_MODE.
+# With PAYMENT_MODE=mercadopago an overlay also sets MERCADOPAGO_NOTIFICATION_URL (and optionally
+# MERCADOPAGO_CHECKOUT_TTL, GATEWAY_WORKER_INTERVAL); MERCADOPAGO_ACCESS_TOKEN and
+# MERCADOPAGO_WEBHOOK_SECRET come from the Secrets Manager secret auto-repair-shop-<env>/billing.
 # BILLING_QUEUE_URL / BILLING_EVENTS_TOPIC_ARN are applied by the docker workflow.
 data:
   PORT: "8083"

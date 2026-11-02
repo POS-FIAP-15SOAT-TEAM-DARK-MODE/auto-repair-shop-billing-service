@@ -29,7 +29,7 @@ paths:
   /v1/payments/{serviceOrderId}:
     get:
       summary: Get the most recent payment of a service order
-      description: Attendant and admin.
+      description: Attendant and admin. For a payment charged through Mercado Pago the response carries the checkout link (`checkout_url`) the attendant gives to the customer, and when it stops being payable (`expires_at`). The customer does not see the payment.
       parameters:
         - name: serviceOrderId
           in: path
@@ -47,7 +47,7 @@ paths:
   /v1/payments/{id}/confirm:
     post:
       summary: Approve a PENDING payment (emits PaymentApproved)
-      description: Attendant and admin.
+      description: Attendant and admin. In mercadopago mode a payment that already has a checkout answers 409, because Mercado Pago decides its status.
       parameters:
         - name: id
           in: path
@@ -66,7 +66,7 @@ paths:
   /v1/payments/{id}/reject:
     post:
       summary: Reject a PENDING payment (emits PaymentFailed with reason PAYMENT_REJECTED)
-      description: Attendant and admin.
+      description: Attendant and admin. In mercadopago mode a payment that already has a checkout answers 409, because Mercado Pago decides its status.
       parameters:
         - name: id
           in: path
@@ -82,6 +82,58 @@ paths:
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
+  /v1/webhooks/mercadopago:
+    post:
+      summary: Mercado Pago payment notification (only in mercadopago mode)
+      description: >
+        Public: it is authenticated only by the `x-signature` header, which is verified before anything else.
+        The body is never trusted for payment data; Billing reads the payment from Mercado Pago by `data.id`.
+        Notifications of other types are acknowledged and ignored. Any 5xx makes Mercado Pago retry.
+      security: []
+      parameters:
+        - name: data.id
+          in: query
+          required: true
+          description: Id of the Mercado Pago payment (signed value).
+          schema: {type: string, example: "186237542593"}
+        - name: type
+          in: query
+          required: false
+          schema: {type: string, example: payment}
+        - name: x-signature
+          in: header
+          required: true
+          description: "ts=<milliseconds>,v1=<hex HMAC-SHA256 of id:<data.id>;request-id:<x-request-id>;ts:<ts>;>"
+          schema: {type: string}
+        - name: x-request-id
+          in: header
+          required: false
+          schema: {type: string}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type: {type: string, example: payment}
+                action: {type: string, example: payment.updated}
+                data:
+                  type: object
+                  properties:
+                    id: {type: string, example: "186237542593"}
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result: {type: string, enum: [applied, duplicate, ignored, unknown]}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     bearerAuth:
@@ -129,5 +181,7 @@ components:
         service_order_id: {type: string}
         amount: {type: string, example: "221.00"}
         status: {type: string, enum: [PENDING, APPROVED, REJECTED, REFUNDED, CANCELLED]}
-        provider: {type: string, example: internal}
+        provider: {type: string, enum: [internal, mercadopago], example: internal}
         created_at: {type: string, format: date-time}
+        checkout_url: {type: string, description: "Only for mercadopago payments once the checkout is open (init_point)."}
+        expires_at: {type: string, format: date-time, description: "Only for mercadopago payments."}
