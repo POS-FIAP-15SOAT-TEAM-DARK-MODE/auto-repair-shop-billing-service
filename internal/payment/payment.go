@@ -123,4 +123,8 @@ type Repository interface {
 type PendingStats struct {
 	Count  int
 	Oldest *time.Time // creation time of the oldest one; nil when there is none
+
+	// Refunds waiting for the gateway: approved payments whose refund was requested and not confirmed yet.
+	RefundsPending      int
+	OldestRefundRequest *time.Time // when the oldest of them was requested; nil when there is none
 }

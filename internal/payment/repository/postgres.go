@@ -25,8 +25,13 @@ const (
 
 	workPrefix        = selectCols + ` WHERE provider = 'mercadopago' AND `
 	workSuffix        = ` ORDER BY last_checked_at NULLS FIRST, created_at, id LIMIT $1`
-	pendingStatsQuery = `SELECT count(*), min(created_at) FROM payment WHERE provider = 'mercadopago' AND status = 'PENDING'`
-	markCheckedQuery  = `UPDATE payment SET last_checked_at = $2 WHERE id = $1`
+	pendingStatsQuery = `SELECT
+		count(*) FILTER (WHERE status = 'PENDING'),
+		min(created_at) FILTER (WHERE status = 'PENDING'),
+		count(*) FILTER (WHERE status = 'APPROVED' AND refund_requested_at IS NOT NULL),
+		min(refund_requested_at) FILTER (WHERE status = 'APPROVED' AND refund_requested_at IS NOT NULL)
+		FROM payment WHERE provider = 'mercadopago' AND status IN ('PENDING', 'APPROVED')`
+	markCheckedQuery = `UPDATE payment SET last_checked_at = $2 WHERE id = $1`
 )
 
 // Postgres implements payment.Repository on the billing database.
@@ -146,12 +151,15 @@ func (r *Postgres) MarkChecked(ctx context.Context, ex db.Executor, id string, a
 // PendingStats counts the Mercado Pago payments in PENDING and finds the oldest.
 func (r *Postgres) PendingStats(ctx context.Context, ex db.Executor) (payment.PendingStats, error) {
 	var out payment.PendingStats
-	var oldest sql.NullTime
-	if err := ex.QueryRowContext(ctx, pendingStatsQuery).Scan(&out.Count, &oldest); err != nil {
+	var oldest, oldestRefund sql.NullTime
+	if err := ex.QueryRowContext(ctx, pendingStatsQuery).Scan(&out.Count, &oldest, &out.RefundsPending, &oldestRefund); err != nil {
 		return payment.PendingStats{}, err
 	}
 	if oldest.Valid {
 		out.Oldest = &oldest.Time
+	}
+	if oldestRefund.Valid {
+		out.OldestRefundRequest = &oldestRefund.Time
 	}
 	return out, nil
 }

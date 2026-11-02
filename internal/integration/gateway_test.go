@@ -424,3 +424,24 @@ func TestGateway_AdvisoryLockExcludesAnotherSessionUntilReleased(t *testing.T) {
 	assert.True(t, ok, "free again after the release")
 	release2()
 }
+
+func TestGateway_RefundBacklogOnPostgres(t *testing.T) {
+	e := setupGateway(t)
+	repo := paymentRepo.NewPostgres()
+	p := e.requestPayment()
+
+	none, err := repo.PendingStats(e.ctx, e.db)
+	require.NoError(t, err)
+	assert.Equal(t, 1, none.Count, "the payment is pending")
+	assert.Zero(t, none.RefundsPending)
+	assert.Nil(t, none.OldestRefundRequest)
+
+	_, err = e.db.ExecContext(e.ctx, "UPDATE payment SET status = 'APPROVED', gateway_payment_id = '1001', refund_requested_at = now() - interval '20 minutes' WHERE id = $1", p.ID)
+	require.NoError(t, err)
+	got, err := repo.PendingStats(e.ctx, e.db)
+	require.NoError(t, err)
+	assert.Zero(t, got.Count, "approved is no longer pending")
+	assert.Equal(t, 1, got.RefundsPending)
+	require.NotNil(t, got.OldestRefundRequest)
+	assert.WithinDuration(t, time.Now().Add(-20*time.Minute), *got.OldestRefundRequest, time.Minute)
+}

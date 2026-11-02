@@ -60,6 +60,17 @@ var (
 		[]string{"step", "kind"},
 	)
 
+	// RefundsPending and RefundsPendingOldestAge describe the refunds the saga asked for that Mercado Pago
+	// has not confirmed: a refund that never turns REFUNDED shows up here as an age that keeps growing.
+	RefundsPending = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "refunds_pending",
+		Help: "Approved Mercado Pago payments whose refund was requested and is not confirmed yet.",
+	})
+	RefundsPendingOldestAge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "refunds_pending_oldest_age_seconds",
+		Help: "Seconds since the oldest unconfirmed refund was requested (0 when there is none).",
+	})
+
 	// GatewayWorkerPasses counts the passes of the gateway worker by result: "ran", "skipped" (another
 	// replica holds the work lock) or "error" (the lock could not be asked). A replica that always skips
 	// is healthy; all replicas skipping, or "error", means no one is doing the work.
@@ -96,5 +107,5 @@ var (
 
 func init() {
 	prometheus.MustRegister(HTTPRequestDuration, OutboxPending, PaymentStatusChanges, GatewayRequests, GatewayRequestDuration,
-		GatewayWorkerErrors, GatewayWorkerPasses, PaymentsPending, PaymentsPendingOldestAge, PaymentsUnsettled)
+		GatewayWorkerErrors, GatewayWorkerPasses, RefundsPending, RefundsPendingOldestAge, PaymentsPending, PaymentsPendingOldestAge, PaymentsUnsettled)
 }

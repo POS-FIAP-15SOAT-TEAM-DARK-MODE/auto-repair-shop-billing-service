@@ -24,6 +24,7 @@ Loki queries match on it.
 | `gateway.payment_not_applied` (`reason`: `status_not_mapped`, `invalid_transition`, `unknown_payment`, `not_found`) | `gateway status not mapped, ignoring` / `gateway status ignored: invalid transition` / `gateway payment of an unknown payment` / `gateway payment of a notification not found` | gateway payment not applied |
 | `payment.unsettled` (`reason`: `extra_approval`, `late_approval`, `amount_mismatch`) | `extra approved gateway payment: needs a manual refund` / `late approval on a closed payment: needs a manual refund` / `approved gateway payment with another amount, not settled` | money taken that Billing did not settle; alert on it |
 | `gateway.worker_step_failed` (`step`: `CREATE_CHECKOUT`, `RECONCILE`, `EXPIRE`, `REFUND`, `CLOSE_CHECKOUT`; `transient`) | the error text | the gateway worker retries with a backoff |
+| `payment.refund_stuck` (warn; `age_seconds`) | `refund not confirmed by the gateway` | a requested refund still unconfirmed after 30 minutes; logged on each retry |
 | `gateway.worker_waiting` (debug) | `waiting for the gateway` | a worker step that only waits for the gateway |
 | `gateway.worker_failed` (`step`) | the error text | listing, stamping or the pending stats of the worker failed |
 
@@ -38,6 +39,7 @@ Registered in `internal/pkg/metrics` and served at `/metrics`.
 - `gateway_worker_passes_total{result}` — passes of the gateway worker: `ran`, `skipped` (another replica holds the work lock; normal on all but one replica) or `error` (the lock could not be asked). Alert if no replica reports `ran`.
 - `gateway_worker_errors_total{step,kind}` — failed worker steps; waiting for the gateway is not an error.
 - `payments_pending` and `payments_pending_oldest_age_seconds` — Mercado Pago payments waiting; refreshed every worker pass. An age above the checkout lifetime means expiry is stuck.
+- `refunds_pending` and `refunds_pending_oldest_age_seconds` — refunds the saga asked for that Mercado Pago has not confirmed. **Alert when the age passes about 30 minutes**: the refund is stuck (refused, or never reported `refunded`).
 - `payments_unsettled_total{reason}` — money Billing did not settle (`extra_approval`, `late_approval`, `amount_mismatch`). **Alert on any increase**: it needs a manual refund or review.
 - Labels never carry ids (no payment, order or gateway ids), so cardinality stays fixed.
 

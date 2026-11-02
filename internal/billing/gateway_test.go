@@ -1122,3 +1122,66 @@ func TestGateway_WithGatewayKeepsTheWorkLock(t *testing.T) {
 	g.svc.WithGateway(GatewayConfig{Gateway: g.gw, WorkLock: lock})
 	assert.Same(t, lock, g.svc.workLock)
 }
+
+// ---- refund backlog ----
+
+func seedRequestedRefund(g *gatewayHarness, requestedAt time.Time) {
+	g.seedGatewayPayment(func(p *payment.Payment) {
+		withCheckout(p)
+		p.Status, p.GatewayPaymentID = payment.StatusApproved, "1001"
+		p.RefundRequestedAt = &requestedAt
+	})
+	g.gw.byID["1001"] = gp("1001", "approved", "221") // Mercado Pago has not refunded it
+}
+
+func TestGateway_ARefundThatStaysUnconfirmedIsWarnedAboutAfterTheThreshold(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	seedRequestedRefund(g, t0)
+
+	g.now = t0.Add(10 * time.Minute) // waiting is normal for a while
+	g.tx(0)
+	g.svc.ProcessGatewayWork(context.Background())
+	assert.NotContains(t, eventsOf(logs), "payment.refund_stuck")
+
+	g.now = t0.Add(31 * time.Minute)
+	g.tx(0)
+	g.svc.ProcessGatewayWork(context.Background())
+
+	stuck := eventsOf(logs)["payment.refund_stuck"]
+	assert.Equal(t, zapcore.WarnLevel, stuck.Level, "warning, not the debug line of a step that waits")
+	assert.Equal(t, "saga-1", stuck.ContextMap()["saga_id"])
+	assert.Equal(t, "1001", stuck.ContextMap()["gateway_payment_id"])
+	assert.InDelta(t, (31 * time.Minute).Seconds(), stuck.ContextMap()["age_seconds"], 1)
+	g.assertDB()
+}
+
+func TestGateway_ARefusedRefundPastTheThresholdIsAlsoWarnedAbout(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	seedRequestedRefund(g, t0)
+	g.gw.refundErr = permanent
+	g.now = t0.Add(time.Hour)
+	g.tx(0)
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Contains(t, eventsOf(logs), "payment.refund_stuck")
+}
+
+func TestGateway_MetricsPublishTheRefundBacklog(t *testing.T) {
+	g := newGatewayHarness(t)
+	seedRequestedRefund(g, t0.Add(-20*time.Minute))
+	g.tx(0)
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(metrics.RefundsPending))
+	assert.InDelta(t, (20 * time.Minute).Seconds(), testutil.ToFloat64(metrics.RefundsPendingOldestAge), 1)
+
+	empty := newGatewayHarness(t)
+	empty.svc.ProcessGatewayWork(context.Background())
+	assert.Equal(t, 0.0, testutil.ToFloat64(metrics.RefundsPending))
+	assert.Equal(t, 0.0, testutil.ToFloat64(metrics.RefundsPendingOldestAge), "no refund waiting, no age")
+	g.assertDB()
+}

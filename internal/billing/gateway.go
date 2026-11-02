@@ -18,10 +18,12 @@ import (
 )
 
 const (
-	workBatch       = 20
-	baseBackoff     = 5 * time.Second
-	maxBackoff      = 5 * time.Minute
-	defaultCheckTTL = 12 * time.Hour // shorter than the orchestrator's 24 h SAGA_PAYMENT_TIMEOUT, so Billing answers first
+	workBatch   = 20
+	baseBackoff = 5 * time.Second
+	maxBackoff  = 5 * time.Minute
+	// refundStuckAfter is how long a requested refund may wait for the gateway before it is logged as stuck.
+	refundStuckAfter = 30 * time.Minute
+	defaultCheckTTL  = 12 * time.Hour // shorter than the orchestrator's 24 h SAGA_PAYMENT_TIMEOUT, so Billing answers first
 )
 
 // GatewayConfig turns on the mercadopago mode of the service.
@@ -276,6 +278,13 @@ func (s *Service) publishPendingStats(ctx context.Context, now time.Time) {
 		age = max(now.Sub(*stats.Oldest).Seconds(), 0)
 	}
 	metrics.PaymentsPendingOldestAge.Set(age)
+
+	metrics.RefundsPending.Set(float64(stats.RefundsPending))
+	refundAge := 0.0
+	if stats.OldestRefundRequest != nil {
+		refundAge = max(now.Sub(*stats.OldestRefundRequest).Seconds(), 0)
+	}
+	metrics.RefundsPendingOldestAge.Set(refundAge)
 }
 
 func (s *Service) logStepError(ctx context.Context, kind payment.WorkKind, p *payment.Payment, err error) {
@@ -429,6 +438,7 @@ func (s *Service) refund(ctx context.Context, p *payment.Payment) error {
 		return err
 	}
 	if st, ok := payment.MapGatewayStatus(gp.Status); !ok || st != payment.StatusRefunded {
+		s.warnIfRefundIsStuck(ctx, p)
 		if refundErr != nil {
 			return refundErr
 		}
@@ -436,6 +446,22 @@ func (s *Service) refund(ctx context.Context, p *payment.Payment) error {
 	}
 	s.retry.forgetRefund(p.ID)
 	return nil
+}
+
+// warnIfRefundIsStuck logs, at warning level, a refund that Mercado Pago has not confirmed after
+// refundStuckAfter. Waiting for it is normal for a few minutes; past that a person has to look, and the
+// debug line of a step that is only waiting would never be read.
+func (s *Service) warnIfRefundIsStuck(ctx context.Context, p *payment.Payment) {
+	if p.RefundRequestedAt == nil {
+		return
+	}
+	age := s.now().Sub(*p.RefundRequestedAt)
+	if age < refundStuckAfter {
+		return
+	}
+	logger.Of(ctx).Warn("refund not confirmed by the gateway", zap.String("event", "payment.refund_stuck"),
+		zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID), zap.String("service_order_id", p.ServiceOrderID),
+		zap.String("gateway_payment_id", p.GatewayPaymentID), zap.Float64("age_seconds", age.Seconds()))
 }
 
 // closeCheckout makes the checkout of a finished payment unpayable, and cancels a gateway payment

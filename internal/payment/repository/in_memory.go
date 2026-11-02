@@ -121,13 +121,22 @@ func matchesWork(p *payment.Payment, kind payment.WorkKind, now time.Time) bool 
 func (r *InMemory) PendingStats(_ context.Context, _ db.Executor) (payment.PendingStats, error) {
 	var out payment.PendingStats
 	for _, p := range r.items {
-		if p.Provider != payment.ProviderMercadoPago || p.Status != payment.StatusPending {
+		if p.Provider != payment.ProviderMercadoPago {
 			continue
 		}
-		out.Count++
-		if out.Oldest == nil || p.CreatedAt.Before(*out.Oldest) {
-			created := p.CreatedAt
-			out.Oldest = &created
+		switch {
+		case p.Status == payment.StatusPending:
+			out.Count++
+			if out.Oldest == nil || p.CreatedAt.Before(*out.Oldest) {
+				created := p.CreatedAt
+				out.Oldest = &created
+			}
+		case p.Status == payment.StatusApproved && p.RefundRequestedAt != nil:
+			out.RefundsPending++
+			if out.OldestRefundRequest == nil || p.RefundRequestedAt.Before(*out.OldestRefundRequest) {
+				requested := *p.RefundRequestedAt
+				out.OldestRefundRequest = &requested
+			}
 		}
 	}
 	return out, nil

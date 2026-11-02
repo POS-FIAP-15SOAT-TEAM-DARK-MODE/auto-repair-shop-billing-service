@@ -232,20 +232,27 @@ func TestInMemory_ListWorkRotatesAndWaitsBetweenLooks(t *testing.T) {
 func TestPostgres_PendingStats(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer func() { _ = db.Close() }()
+	cols := []string{"pending", "oldest", "refunds", "oldest_refund"}
 	oldest := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
-	mock.ExpectQuery("FROM payment WHERE provider = 'mercadopago' AND status = 'PENDING'").
-		WillReturnRows(sqlmock.NewRows([]string{"count", "min"}).AddRow(3, oldest))
+	requested := time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)
+	mock.ExpectQuery("FROM payment WHERE provider = 'mercadopago' AND status IN").
+		WillReturnRows(sqlmock.NewRows(cols).AddRow(3, oldest, 2, requested))
 	got, err := NewPostgres().PendingStats(context.Background(), db)
 	require.NoError(t, err)
 	assert.Equal(t, 3, got.Count)
 	require.NotNil(t, got.Oldest)
 	assert.True(t, got.Oldest.Equal(oldest))
+	assert.Equal(t, 2, got.RefundsPending)
+	require.NotNil(t, got.OldestRefundRequest)
+	assert.True(t, got.OldestRefundRequest.Equal(requested))
 
-	mock.ExpectQuery("FROM payment").WillReturnRows(sqlmock.NewRows([]string{"count", "min"}).AddRow(0, nil))
+	mock.ExpectQuery("FROM payment").WillReturnRows(sqlmock.NewRows(cols).AddRow(0, nil, 0, nil))
 	got, err = NewPostgres().PendingStats(context.Background(), db)
 	require.NoError(t, err)
 	assert.Zero(t, got.Count)
 	assert.Nil(t, got.Oldest)
+	assert.Zero(t, got.RefundsPending)
+	assert.Nil(t, got.OldestRefundRequest)
 
 	mock.ExpectQuery("FROM payment").WillReturnError(errors.New("boom"))
 	_, err = NewPostgres().PendingStats(context.Background(), db)
@@ -267,4 +274,22 @@ func TestInMemory_PendingStats(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, got.Count, "only the Mercado Pago payments that are pending")
 	assert.True(t, got.Oldest.Equal(early))
+	assert.Zero(t, got.RefundsPending)
+	assert.Nil(t, got.OldestRefundRequest)
+
+	t1, t2 := late, late.Add(time.Hour)
+	for _, p := range []*payment.Payment{
+		{ID: "e", Provider: payment.ProviderMercadoPago, Status: payment.StatusApproved, RefundRequestedAt: &t2},
+		{ID: "f", Provider: payment.ProviderMercadoPago, Status: payment.StatusApproved, RefundRequestedAt: &t1},
+		{ID: "g", Provider: payment.ProviderMercadoPago, Status: payment.StatusApproved},                         // approved, no refund asked
+		{ID: "h", Provider: payment.ProviderMercadoPago, Status: payment.StatusRefunded, RefundRequestedAt: &t1}, // already done
+		{ID: "i", Provider: payment.ProviderName, Status: payment.StatusApproved, RefundRequestedAt: &t1},        // not Mercado Pago
+	} {
+		require.NoError(t, repo.Create(context.Background(), nil, p))
+		_ = repo.Update(context.Background(), nil, p)
+	}
+	got, err = repo.PendingStats(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.RefundsPending, "only approved payments with a requested refund")
+	assert.True(t, got.OldestRefundRequest.Equal(t1))
 }
