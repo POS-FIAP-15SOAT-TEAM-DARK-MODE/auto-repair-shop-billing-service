@@ -314,10 +314,16 @@ func TestPostgres_RecordUnsettled(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	u := &payment.Unsettled{GatewayPaymentID: "1001", PaymentID: "p1", Reason: payment.UnsettledLateApproval, Amount: decimal.RequireFromString("221")}
 
-	mock.ExpectExec("INSERT INTO unsettled_payment").WithArgs("1001", "p1", "LATE_APPROVAL", "221.00").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO unsettled_payment").WithArgs("1001", "p1", "LATE_APPROVAL", "221.00", "PENDING").WillReturnResult(sqlmock.NewResult(0, 1))
 	isNew, err := NewPostgres().RecordUnsettled(context.Background(), db, u)
 	require.NoError(t, err)
 	assert.True(t, isNew)
+
+	review := &payment.Unsettled{GatewayPaymentID: "1002", PaymentID: "p1", Reason: payment.UnsettledAmountMismatch, Amount: decimal.RequireFromString("200"), NeedsReview: true}
+	mock.ExpectExec("INSERT INTO unsettled_payment").WithArgs("1002", "p1", "AMOUNT_MISMATCH", "200.00", "REVIEW").WillReturnResult(sqlmock.NewResult(0, 1))
+	isNew, err = NewPostgres().RecordUnsettled(context.Background(), db, review)
+	require.NoError(t, err)
+	assert.True(t, isNew, "recorded for review, not for refund")
 
 	mock.ExpectExec("INSERT INTO unsettled_payment").WillReturnResult(sqlmock.NewResult(0, 0)) // ON CONFLICT DO NOTHING
 	isNew, err = NewPostgres().RecordUnsettled(context.Background(), db, u)
@@ -374,6 +380,9 @@ func TestInMemory_UnsettledPaymentsAreRecordedOnceListedFairlyAndClosed(t *testi
 	ctx := context.Background()
 	repo := NewInMemory()
 	at := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	reviewed, err := repo.RecordUnsettled(ctx, nil, &payment.Unsettled{GatewayPaymentID: "rev", PaymentID: "p", Reason: payment.UnsettledAmountMismatch, Amount: decimal.NewFromInt(1), CreatedAt: at, NeedsReview: true})
+	require.NoError(t, err)
+	assert.True(t, reviewed)
 	mk := func(id string, created time.Time) *payment.Unsettled {
 		return &payment.Unsettled{GatewayPaymentID: id, PaymentID: "p", Reason: payment.UnsettledLateApproval, Amount: decimal.NewFromInt(1), CreatedAt: created}
 	}
@@ -404,6 +413,6 @@ func TestInMemory_UnsettledPaymentsAreRecordedOnceListedFairlyAndClosed(t *testi
 
 	stats, err := repo.PendingStats(ctx, nil)
 	require.NoError(t, err)
-	assert.Equal(t, 2, stats.UnsettledPending)
+	assert.Equal(t, 2, stats.UnsettledPending, "a payment recorded for review is not a refund to give")
 	assert.True(t, stats.OldestUnsettled.Equal(at))
 }

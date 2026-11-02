@@ -144,7 +144,7 @@ func (r *InMemory) PendingStats(_ context.Context, _ db.Executor) (payment.Pendi
 		}
 	}
 	for _, u := range r.unsettled {
-		if r.unsettledDone[u.GatewayPaymentID] {
+		if r.unsettledDone[u.GatewayPaymentID] || u.NeedsReview {
 			continue
 		}
 		out.UnsettledPending++
@@ -172,7 +172,7 @@ func (r *InMemory) RecordUnsettled(_ context.Context, _ db.Executor, u *payment.
 func (r *InMemory) ListUnsettled(_ context.Context, _ db.Executor, limit int) ([]*payment.Unsettled, error) {
 	var out []*payment.Unsettled
 	for _, u := range r.unsettled {
-		if !r.unsettledDone[u.GatewayPaymentID] {
+		if !r.unsettledDone[u.GatewayPaymentID] && !u.NeedsReview {
 			cp := *u
 			out = append(out, &cp)
 		}

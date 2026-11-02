@@ -72,12 +72,12 @@ var (
 	})
 
 	// GatewayWorkerPasses counts the passes of the gateway worker by result: "ran", "skipped" (another
-	// replica holds the work lock) or "error" (the lock could not be asked). A replica that always skips
+	// replica holds the work lock), "error" (the lock could not be asked) or "lost" (the session that held the lock died mid-pass). A replica that always skips
 	// is healthy; all replicas skipping, or "error", means no one is doing the work.
 	GatewayWorkerPasses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "gateway_worker_passes_total",
-			Help: "Passes of the gateway worker, by result (ran, skipped, error).",
+			Help: "Passes of the gateway worker, by result (ran, skipped, error, lost).",
 		},
 		[]string{"result"},
 	)

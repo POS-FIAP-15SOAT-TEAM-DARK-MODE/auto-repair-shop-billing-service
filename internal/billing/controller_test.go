@@ -253,6 +253,16 @@ func TestWebhook_ABodyOverTheLimitIsRefusedNotCutShort(t *testing.T) {
 	g.assertDB()
 }
 
+func TestWebhook_AnInvalidSignatureIsLoggedAsAnEvent(t *testing.T) {
+	logs := captureLogs(t)
+	c, _ := newWebhookController(t, &fakeVerifier{err: errors.New("bad signature")})
+
+	_, err := c.Webhook(context.Background(), webhookRequest("data.id=1&type=payment", `{}`))
+
+	assert.ErrorIs(t, err, payment.ErrInvalidSignature)
+	assert.Equal(t, "invalid_signature", eventsOf(logs)["webhook.rejected"].ContextMap()["reason"])
+}
+
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("read boom") }

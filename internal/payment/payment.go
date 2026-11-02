@@ -118,7 +118,7 @@ type Repository interface {
 	// MarkChecked records that the gateway worker looked at the payment at the given time.
 	MarkChecked(ctx context.Context, ex db.Executor, id string, at time.Time) error
 
-	// RecordUnsettled stores an approved gateway payment that must be refunded. It reports whether the
+	// RecordUnsettled stores an approved gateway payment that must be refunded, or reviewed by a person. It reports whether the
 	// row is new: the same gateway payment is never recorded twice.
 	RecordUnsettled(ctx context.Context, ex db.Executor, u *Unsettled) (bool, error)
 	// ListUnsettled returns up to limit unsettled payments still to be refunded, the ones looked at least
@@ -138,6 +138,9 @@ const (
 	UnsettledLateApproval UnsettledReason = "LATE_APPROVAL"
 	// UnsettledExtraApproval: a second approved payment for a payment already approved.
 	UnsettledExtraApproval UnsettledReason = "EXTRA_APPROVAL"
+	// UnsettledAmountMismatch: approved for another amount than the one charged. It is never refunded
+	// automatically: it is recorded for review, so a person decides.
+	UnsettledAmountMismatch UnsettledReason = "AMOUNT_MISMATCH"
 )
 
 // Unsettled is an approved payment at the gateway that Billing did not settle and has to refund.
@@ -147,6 +150,7 @@ type Unsettled struct {
 	Reason           UnsettledReason
 	Amount           decimal.Decimal
 	CreatedAt        time.Time
+	NeedsReview      bool // recorded for a person to decide: the worker does not refund it
 }
 
 // PendingStats is what the worker publishes about the Mercado Pago payments waiting to be settled.

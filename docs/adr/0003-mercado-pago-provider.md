@@ -97,6 +97,7 @@ not hold the database transaction of a command. The saga, its message contracts 
   request, which is classified as transient and retried; reading first lets a refund made from the seller's
   panel settle the payment (or close the unsettled record) without a webhook, and makes the stuck-refund warning
   fire even while the request is refused. The live test of the unsettled-payment refund found this.
+- The worker queries are served by three small partial indexes (migration `000005`); the one for refunds and the one for closings exist so the finished payments that pile up are never walked. An approval with another amount is recorded in `unsettled_payment` with status `REVIEW` and reported once.
 - The replicas take turns: each worker pass starts with a Postgres advisory lock (`pg_try_advisory_lock`, no
   waiting). The replica that gets it runs the pass and the others skip it (`gateway_worker_passes_total`).
   Without it every replica would list the same payments, and two replicas opening the checkout of one

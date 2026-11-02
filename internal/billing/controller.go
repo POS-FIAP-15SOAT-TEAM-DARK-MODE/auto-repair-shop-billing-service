@@ -195,7 +195,7 @@ func (c *Controller) Webhook(ctx context.Context, req *http.Request) (webhookRes
 	}
 
 	if err := c.verifier.Verify(req.Header.Get("x-signature"), req.Header.Get("x-request-id"), dataID); err != nil {
-		logger.Of(ctx).Warn("payment webhook rejected: invalid signature", zap.String("request_id", req.Header.Get("x-request-id")))
+		logger.Of(ctx).Warn("payment webhook rejected: invalid signature", zap.String("event", "webhook.rejected"), zap.String("reason", "invalid_signature"), zap.String("request_id", req.Header.Get("x-request-id")))
 		return webhookResponse{}, payment.ErrInvalidSignature
 	}
 	if typ != "payment" {

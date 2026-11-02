@@ -33,7 +33,7 @@ const (
 		FROM payment WHERE provider = 'mercadopago' AND status IN ('PENDING', 'APPROVED')`
 	markCheckedQuery = `UPDATE payment SET last_checked_at = $2 WHERE id = $1`
 
-	insertUnsettledQuery       = `INSERT INTO unsettled_payment (gateway_payment_id, payment_id, reason, amount) VALUES ($1, $2, $3, $4) ON CONFLICT (gateway_payment_id) DO NOTHING`
+	insertUnsettledQuery       = `INSERT INTO unsettled_payment (gateway_payment_id, payment_id, reason, amount, status) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (gateway_payment_id) DO NOTHING`
 	listUnsettledQuery         = `SELECT gateway_payment_id, payment_id, reason, amount, created_at FROM unsettled_payment WHERE status = 'PENDING' ORDER BY last_checked_at NULLS FIRST, created_at LIMIT $1`
 	markUnsettledCheckedQuery  = `UPDATE unsettled_payment SET last_checked_at = $2 WHERE gateway_payment_id = $1`
 	markUnsettledRefundedQuery = `UPDATE unsettled_payment SET status = 'REFUNDED', refunded_at = $2 WHERE gateway_payment_id = $1`
@@ -179,7 +179,11 @@ func (r *Postgres) PendingStats(ctx context.Context, ex db.Executor) (payment.Pe
 
 // RecordUnsettled stores an approved gateway payment that has to be refunded; false means it was already recorded.
 func (r *Postgres) RecordUnsettled(ctx context.Context, ex db.Executor, u *payment.Unsettled) (bool, error) {
-	res, err := ex.ExecContext(ctx, insertUnsettledQuery, u.GatewayPaymentID, u.PaymentID, string(u.Reason), u.Amount.StringFixed(2))
+	status := "PENDING"
+	if u.NeedsReview {
+		status = "REVIEW"
+	}
+	res, err := ex.ExecContext(ctx, insertUnsettledQuery, u.GatewayPaymentID, u.PaymentID, string(u.Reason), u.Amount.StringFixed(2), status)
 	if err != nil {
 		return false, err
 	}

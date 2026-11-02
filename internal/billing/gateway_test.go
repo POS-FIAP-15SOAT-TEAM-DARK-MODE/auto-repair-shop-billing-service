@@ -1144,15 +1144,24 @@ type fakeLock struct {
 	err      error
 	tried    int
 	released int
+	lostAt   int // the lock is lost after this many checks (0: never)
+	checks   int
 }
 
-func (f *fakeLock) TryLock(context.Context) (func(), bool, error) {
+func (f *fakeLock) TryLock(context.Context) (WorkLease, bool, error) {
 	f.tried++
 	if f.err != nil || !f.ok {
 		return nil, false, f.err
 	}
-	return func() { f.released++ }, true, nil
+	return f, true, nil
 }
+
+func (f *fakeLock) Held(context.Context) bool {
+	f.checks++
+	return f.lostAt == 0 || f.checks < f.lostAt
+}
+
+func (f *fakeLock) Release() { f.released++ }
 
 func passes(result string) float64 {
 	return testutil.ToFloat64(metrics.GatewayWorkerPasses.WithLabelValues(result))
@@ -1482,5 +1491,112 @@ func TestGateway_AnUnsettledRefundRefusedAsTransientWarnsOnceItIsStuck(t *testin
 
 	assert.Equal(t, 1, pendingUnsettled(g))
 	assert.Contains(t, eventsOf(logs), "payment.refund_stuck")
+	g.assertDB()
+}
+
+func TestGateway_AnAbandonedLockStopsThePassAndIsCounted(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	lock := &fakeLock{ok: true, lostAt: 2} // fine before the first step, gone before the second
+	g.svc.workLock = lock
+	g.seedGatewayPayment(nil)
+	lostBefore := passes("lost")
+	g.tx(0) // the creation of the checkout, the only step that ran
+
+	g.svc.ProcessGatewayWork(context.Background())
+
+	assert.Len(t, g.gw.created, 1, "the first step ran")
+	assert.Equal(t, 0, g.gw.finds, "the next steps did not: another replica may have taken over")
+	assert.Equal(t, lostBefore+1, passes("lost"))
+	assert.Equal(t, 1, lock.released, "the lease is still released")
+	assert.Equal(t, "LOCK", eventsOf(logs)["gateway.worker_failed"].ContextMap()["step"])
+	g.assertDB()
+}
+
+// ---- unsettled payments: reporting, review and the refunded payment ----
+
+func TestGateway_ANewApprovalOnARefundedPaymentIsScheduledForRefund(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) {
+		withCheckout(p)
+		p.Status, p.GatewayPaymentID = payment.StatusRefunded, "1001"
+	})
+
+	g.tx(0)
+	res, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1002", "approved", "221")) // the open link was paid again
+	require.NoError(t, err)
+	assert.Equal(t, ResultRefundScheduled, res)
+	list, _ := g.payments.ListUnsettled(context.Background(), nil, 10)
+	require.Len(t, list, 1)
+	assert.Equal(t, "1002", list[0].GatewayPaymentID)
+
+	g.tx(0)
+	res, err = g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "approved", "221")) // an old notification of the refunded payment itself
+	require.NoError(t, err)
+	assert.NotEqual(t, ResultRefundScheduled, res, "the payment that was refunded is not paid again")
+	list, _ = g.payments.ListUnsettled(context.Background(), nil, 10)
+	assert.Len(t, list, 1)
+	g.assertDB()
+}
+
+func TestGateway_AnAmountMismatchIsRecordedForReviewAndCountedOnce(t *testing.T) {
+	logs := captureLogs(t)
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	before := unsettled("amount_mismatch")
+
+	for range 4 { // the reconciliation sees it again and again
+		g.tx(0)
+		res, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "approved", "200"))
+		require.NoError(t, err)
+		assert.Equal(t, ResultIgnored, res)
+	}
+
+	assert.Equal(t, before+1, unsettled("amount_mismatch"), "counted once, not on every pass")
+	mismatches := 0
+	for _, e := range logs.All() {
+		if e.ContextMap()["reason"] == "amount_mismatch" {
+			mismatches++
+		}
+	}
+	assert.Equal(t, 1, mismatches, "logged once")
+	isNew, err := g.payments.RecordUnsettled(context.Background(), nil, &payment.Unsettled{GatewayPaymentID: "1001", PaymentID: "pay-1"})
+	require.NoError(t, err)
+	assert.False(t, isNew, "it is in the table, where a person can find it")
+	pending, _ := g.payments.ListUnsettled(context.Background(), nil, 10)
+	assert.Empty(t, pending, "the worker does not refund it")
+	assert.Equal(t, payment.StatusPending, g.reload().Status)
+	g.assertDB()
+}
+
+func TestGateway_AnUnsettledPaymentIsReportedOnlyOnceTheTransactionCommitted(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) { withCheckout(p); p.Status = payment.StatusCancelled })
+	before := unsettled("late_approval")
+	g.mock.ExpectBegin()
+	g.mock.ExpectCommit().WillReturnError(errors.New("commit boom"))
+
+	_, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "approved", "221"))
+
+	assert.ErrorContains(t, err, "commit boom")
+	assert.Equal(t, before, unsettled("late_approval"), "a transaction that did not commit is not counted")
+}
+
+func TestGateway_AWebhookThatClosesARefundClearsTheWorkersMemoryOfIt(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) {
+		withCheckout(p)
+		p.Status, p.GatewayPaymentID = payment.StatusApproved, "1001"
+	})
+	g.svc.retry.markRefundSubmitted("pay-1")
+	g.svc.retry.fail("REFUND:pay-1", t0)
+	g.tx(1)
+
+	res, err := g.svc.ApplyGatewayPayment(context.Background(), gp("1001", "refunded", "221"))
+
+	require.NoError(t, err)
+	assert.Equal(t, ResultApplied, res)
+	assert.False(t, g.svc.retry.refundSubmitted("pay-1"))
+	assert.True(t, g.svc.retry.ready("REFUND:pay-1", t0), "no backoff is left behind")
 	g.assertDB()
 }

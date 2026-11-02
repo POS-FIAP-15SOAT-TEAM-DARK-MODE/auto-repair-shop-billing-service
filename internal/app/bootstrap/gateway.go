@@ -45,7 +45,7 @@ func gatewayMode(service *billing.Service, database *sql.DB) (*billing.Controlle
 		Gateway:         mercadopago.Instrument(gateway),
 		NotificationURL: env.GetString("MERCADOPAGO_NOTIFICATION_URL", ""),
 		CheckoutTTL:     env.GetTimeDuration("MERCADOPAGO_CHECKOUT_TTL", 12*time.Hour),
-		WorkLock:        postgres.NewAdvisoryLock(database, gatewayWorkerLockKey),
+		WorkLock:        advisoryWorkLock{postgres.NewAdvisoryLock(database, gatewayWorkerLockKey)},
 	})
 	controller := billing.NewController(service).WithWebhook(mercadopago.Verifier{
 		Secret:    secret,
@@ -55,4 +55,15 @@ func gatewayMode(service *billing.Service, database *sql.DB) (*billing.Controlle
 	interval := env.GetTimeDuration("GATEWAY_WORKER_INTERVAL", 5*time.Second)
 	worker := newWorker("gateway-worker", func(ctx context.Context) error { return service.RunGatewayWorker(ctx, interval) })
 	return controller, []app.Server{worker}, nil
+}
+
+// advisoryWorkLock makes the Postgres advisory lock a billing.WorkLock.
+type advisoryWorkLock struct{ lock *postgres.AdvisoryLock }
+
+func (a advisoryWorkLock) TryLock(ctx context.Context) (billing.WorkLease, bool, error) {
+	lease, ok, err := a.lock.TryLock(ctx)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	return lease, true, nil
 }

@@ -390,8 +390,8 @@ func TestGateway_TwoReplicasOpenTheCheckoutOnce(t *testing.T) {
 	p := e.requestPayment()
 	e.gw.delay = 200 * time.Millisecond // long enough for the replicas to overlap if nothing keeps them apart
 	other := e.newReplica()
-	lockA := postgres.NewAdvisoryLock(e.db, 4242)
-	lockB := postgres.NewAdvisoryLock(e.db, 4242)
+	lockA := workLock{postgres.NewAdvisoryLock(e.db, 4242)}
+	lockB := workLock{postgres.NewAdvisoryLock(e.db, 4242)}
 	e.svc.WithGateway(billing.GatewayConfig{Gateway: e.gw, CheckoutTTL: 48 * time.Hour, WorkLock: lockA})
 	other.WithGateway(billing.GatewayConfig{Gateway: e.gw, CheckoutTTL: 48 * time.Hour, WorkLock: lockB})
 
@@ -413,19 +413,51 @@ func TestGateway_AdvisoryLockExcludesAnotherSessionUntilReleased(t *testing.T) {
 	first := postgres.NewAdvisoryLock(e.db, 4243)
 	second := postgres.NewAdvisoryLock(e.db, 4243)
 
-	release, ok, err := first.TryLock(e.ctx)
+	lease, ok, err := first.TryLock(e.ctx)
 	require.NoError(t, err)
 	require.True(t, ok)
+	assert.True(t, lease.Held(e.ctx))
 
 	_, ok, err = second.TryLock(e.ctx)
 	require.NoError(t, err)
 	assert.False(t, ok, "held by the first session")
 
-	release()
-	release2, ok, err := second.TryLock(e.ctx)
+	lease.Release()
+	lease2, ok, err := second.TryLock(e.ctx)
 	require.NoError(t, err)
 	assert.True(t, ok, "free again after the release")
-	release2()
+	lease2.Release()
+}
+
+func TestGateway_AdvisoryLockIsLostWithItsSessionAndTheLeaseSaysSo(t *testing.T) {
+	e := setupGateway(t)
+	lock := postgres.NewAdvisoryLock(e.db, 4244)
+	lease, ok, err := lock.TryLock(e.ctx)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// the server drops the session that holds the lock (a restart, a failover, an admin)
+	_, err = e.db.ExecContext(e.ctx, "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND objid = 4244 AND granted")
+	require.NoError(t, err)
+
+	assert.Eventually(t, func() bool { return !lease.Held(e.ctx) }, 5*time.Second, 50*time.Millisecond, "a dead session means the lock is gone")
+	lease.Release() // must not panic or hang on a dead connection
+
+	again, ok, err := lock.TryLock(e.ctx)
+	require.NoError(t, err)
+	assert.True(t, ok, "another replica can take over")
+	again.Release()
+}
+
+// workLock makes the Postgres advisory lock a billing.WorkLock, like the bootstrap does.
+type workLock struct{ lock *postgres.AdvisoryLock }
+
+func (w workLock) TryLock(ctx context.Context) (billing.WorkLease, bool, error) {
+	lease, ok, err := w.lock.TryLock(ctx)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	return lease, true, nil
 }
 
 func TestGateway_RefundBacklogOnPostgres(t *testing.T) {

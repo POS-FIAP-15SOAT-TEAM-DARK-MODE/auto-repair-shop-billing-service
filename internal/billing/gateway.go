@@ -23,7 +23,9 @@ const (
 	maxBackoff  = 5 * time.Minute
 	// refundStuckAfter is how long a requested refund may wait for the gateway before it is logged as stuck.
 	refundStuckAfter = 30 * time.Minute
-	defaultCheckTTL  = 12 * time.Hour // shorter than the orchestrator's 24 h SAGA_PAYMENT_TIMEOUT, so Billing answers first
+	// gatewayPassTimeout bounds one pass of the worker; the SDK already times each call out at 10 s.
+	gatewayPassTimeout = 2 * time.Minute
+	defaultCheckTTL    = 12 * time.Hour // shorter than the orchestrator's 24 h SAGA_PAYMENT_TIMEOUT, so Billing answers first
 )
 
 // GatewayConfig turns on the mercadopago mode of the service.
@@ -41,9 +43,16 @@ type GatewayConfig struct {
 // of the same payment leave a second, payable preference behind (Mercado Pago ignores the idempotency
 // key when it creates one).
 type WorkLock interface {
-	// TryLock does not wait. ok is false when another replica holds the lock; when it is true, release
-	// must be called once the pass is over.
-	TryLock(ctx context.Context) (release func(), ok bool, err error)
+	// TryLock does not wait. ok is false when another replica holds the lock; when it is true, the lease
+	// must be released once the pass is over.
+	TryLock(ctx context.Context) (lease WorkLease, ok bool, err error)
+}
+
+// WorkLease is a work lock that was taken.
+type WorkLease interface {
+	// Held says whether the lock is still held: a lost session means another replica may have taken over.
+	Held(ctx context.Context) bool
+	Release()
 }
 
 // WithGateway enables the gateway mode: RequestPayment records a PENDING payment and the gateway
@@ -104,7 +113,9 @@ const (
 func (s *Service) ApplyGatewayPayment(ctx context.Context, gp payment.GatewayPayment) (ApplyResult, error) {
 	target, mapped := payment.MapGatewayStatus(gp.Status)
 	result := ResultIgnored
+	var after []func() // what is reported only once the transaction has committed
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		after = nil // a retried transaction starts again
 		pay, err := s.payments.FindByIDForUpdate(ctx, tx, gp.ExternalReference)
 		if errors.Is(err, payment.ErrNotFound) {
 			logger.Of(ctx).Warn("gateway payment of an unknown payment", zap.String("event", "gateway.payment_not_applied"), zap.String("reason", "unknown_payment"), zap.String("gateway_payment_id", gp.ID))
@@ -118,46 +129,78 @@ func (s *Service) ApplyGatewayPayment(ctx context.Context, gp payment.GatewayPay
 			logger.Of(ctx).Warn("gateway status not mapped, ignoring", zap.String("event", "gateway.payment_not_applied"), zap.String("reason", "status_not_mapped"), zap.String("payment_id", pay.ID), zap.String("saga_id", pay.SagaID), zap.String("service_order_id", pay.ServiceOrderID), zap.String("gateway_status", gp.Status))
 			return nil
 		}
-		result, err = s.applyLocked(ctx, tx, pay, gp, target)
+		result, err = s.applyLocked(ctx, tx, pay, gp, target, &after)
 		return err
 	})
-	if err == nil && result == ResultApplied {
-		metrics.PaymentStatusChanges.WithLabelValues(string(target), "gateway").Inc()
+	if err != nil {
+		return result, err
 	}
-	return result, err
+	for _, report := range after {
+		report()
+	}
+	if result == ResultApplied {
+		metrics.PaymentStatusChanges.WithLabelValues(string(target), "gateway").Inc()
+		if target == payment.StatusRefunded {
+			s.retry.forgetRefund(gp.ExternalReference) // the webhook got there before the worker did
+			s.retry.clear(string(payment.WorkRefund) + ":" + gp.ExternalReference)
+		}
+	}
+	return result, nil
 }
 
-// scheduleRefund records an approved gateway payment that cannot settle the payment, in the same
-// transaction, so the worker refunds it. The money is the customer's: nothing is owed to the saga, which
-// has already moved on, so no event is published. Seen again (a repeated notification), it is not
-// recorded or counted twice.
-func (s *Service) scheduleRefund(ctx context.Context, tx *sql.Tx, pay *payment.Payment, gp payment.GatewayPayment, reason payment.UnsettledReason, label, msg string, fields []zap.Field) (ApplyResult, error) {
-	isNew, err := s.payments.RecordUnsettled(ctx, tx, &payment.Unsettled{GatewayPaymentID: gp.ID, PaymentID: pay.ID, Reason: reason, Amount: gp.Amount})
+// recordUnsettled stores an approved gateway payment that cannot settle the payment, in the same
+// transaction. report (the log, and the metric) runs after the commit, and only the first time the gateway
+// payment is seen: a repeated notification is not recorded or counted again.
+func (s *Service) recordUnsettled(ctx context.Context, tx *sql.Tx, pay *payment.Payment, gp payment.GatewayPayment, reason payment.UnsettledReason, review bool,
+	label string, after *[]func(), report func()) error {
+	isNew, err := s.payments.RecordUnsettled(ctx, tx, &payment.Unsettled{GatewayPaymentID: gp.ID, PaymentID: pay.ID, Reason: reason, Amount: gp.Amount, NeedsReview: review})
+	if err != nil || !isNew {
+		return err
+	}
+	*after = append(*after, func() {
+		metrics.PaymentsUnsettled.WithLabelValues(label).Inc()
+		report()
+	})
+	return nil
+}
+
+// scheduleRefund records a late or extra approval, so the worker refunds it. The money is the customer's:
+// nothing is owed to the saga, which has already moved on, so no event is published.
+func (s *Service) scheduleRefund(ctx context.Context, tx *sql.Tx, pay *payment.Payment, gp payment.GatewayPayment, reason payment.UnsettledReason,
+	label, msg string, fields []zap.Field, after *[]func()) (ApplyResult, error) {
+	err := s.recordUnsettled(ctx, tx, pay, gp, reason, false, label, after, func() {
+		logger.Of(ctx).Warn(msg, append(fields, zap.String("event", "payment.unsettled"), zap.String("reason", label))...)
+	})
 	if err != nil {
 		return ResultIgnored, err
-	}
-	if isNew {
-		metrics.PaymentsUnsettled.WithLabelValues(label).Inc()
-		logger.Of(ctx).Warn(msg, append(fields, zap.String("event", "payment.unsettled"), zap.String("reason", label))...)
 	}
 	return ResultRefundScheduled, nil
 }
 
-func (s *Service) applyLocked(ctx context.Context, tx *sql.Tx, pay *payment.Payment, gp payment.GatewayPayment, target payment.Status) (ApplyResult, error) {
+func (s *Service) applyLocked(ctx context.Context, tx *sql.Tx, pay *payment.Payment, gp payment.GatewayPayment, target payment.Status, after *[]func()) (ApplyResult, error) {
 	base := []zap.Field{zap.String("payment_id", pay.ID), zap.String("saga_id", pay.SagaID), zap.String("service_order_id", pay.ServiceOrderID), zap.String("gateway_payment_id", gp.ID)}
 	fields := func(extra ...zap.Field) []zap.Field { return append(slices.Clone(base), extra...) }
+
+	// A payment already refunded can be paid again through a link that is still open; the approval of the
+	// payment that was refunded itself (an old notification) is not a new one.
+	closed := pay.Status == payment.StatusCancelled || pay.Status == payment.StatusRejected ||
+		(pay.Status == payment.StatusRefunded && pay.GatewayPaymentID != gp.ID)
 
 	switch {
 	case target == payment.StatusApproved && pay.Status == payment.StatusApproved && pay.GatewayPaymentID != "" && pay.GatewayPaymentID != gp.ID:
 		return s.scheduleRefund(ctx, tx, pay, gp, payment.UnsettledExtraApproval, "extra_approval",
-			"extra approved gateway payment: refund scheduled", fields(zap.String("settled_by", pay.GatewayPaymentID)))
-	case target == payment.StatusApproved && (pay.Status == payment.StatusCancelled || pay.Status == payment.StatusRejected):
+			"extra approved gateway payment: refund scheduled", fields(zap.String("settled_by", pay.GatewayPaymentID)), after)
+	case target == payment.StatusApproved && closed:
 		return s.scheduleRefund(ctx, tx, pay, gp, payment.UnsettledLateApproval, "late_approval",
-			"late approval on a closed payment: refund scheduled", fields(zap.String("status", string(pay.Status))))
+			"late approval on a closed payment: refund scheduled", fields(zap.String("status", string(pay.Status))), after)
 	case target == payment.StatusApproved && !gp.Amount.Equal(pay.Amount):
-		metrics.PaymentsUnsettled.WithLabelValues("amount_mismatch").Inc()
-		logger.Of(ctx).Error(errors.New("approved gateway payment with another amount, not settled"), fields(zap.String("event", "payment.unsettled"), zap.String("reason", "amount_mismatch"), zap.String("expected", formatMoney(pay.Amount)), zap.String("got", formatMoney(gp.Amount)))...)
-		return ResultIgnored, nil
+		// Not refunded automatically: a person decides. It is recorded so it is reported once, however
+		// many times the reconciliation sees it, and so it can be found in the table.
+		err := s.recordUnsettled(ctx, tx, pay, gp, payment.UnsettledAmountMismatch, true, "amount_mismatch", after, func() {
+			logger.Of(ctx).Error(errors.New("approved gateway payment with another amount, not settled"),
+				fields(zap.String("event", "payment.unsettled"), zap.String("reason", "amount_mismatch"), zap.String("expected", formatMoney(pay.Amount)), zap.String("got", formatMoney(gp.Amount)))...)
+		})
+		return ResultIgnored, err
 	case target == pay.Status:
 		if pay.GatewayPaymentID == "" && gp.ID != "" {
 			pay.GatewayPaymentID = gp.ID // remembered so the expiry knows what to cancel
@@ -182,7 +225,9 @@ func (s *Service) applyLocked(ctx context.Context, tx *sql.Tx, pay *payment.Paym
 	if err := s.publishOutcome(ctx, tx, pay, target); err != nil {
 		return ResultIgnored, err
 	}
-	logger.Of(ctx).Info("payment status applied from the gateway", fields(zap.String("event", "payment.status_applied"), zap.String("from", string(previous)), zap.String("to", string(target)))...)
+	*after = append(*after, func() {
+		logger.Of(ctx).Info("payment status applied from the gateway", fields(zap.String("event", "payment.status_applied"), zap.String("from", string(previous)), zap.String("to", string(target)))...)
+	})
 	return ResultApplied, nil
 }
 
@@ -216,8 +261,9 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 	if s.gateway == nil {
 		return
 	}
+	var lease WorkLease
 	if s.workLock != nil {
-		release, ok, err := s.workLock.TryLock(ctx)
+		l, ok, err := s.workLock.TryLock(ctx)
 		switch {
 		case err != nil:
 			metrics.GatewayWorkerPasses.WithLabelValues("error").Inc()
@@ -227,7 +273,21 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 			metrics.GatewayWorkerPasses.WithLabelValues("skipped").Inc() // another replica is running this pass
 			return
 		}
-		defer release()
+		lease = l
+		defer lease.Release()
+	}
+	// A pass is bounded, so a hung gateway call cannot hold the lock (and with it every replica) for long.
+	ctx, cancel := context.WithTimeout(ctx, gatewayPassTimeout)
+	defer cancel()
+	// The lock is lost with its session. When that happens another replica may already be working, so this
+	// one stops instead of finishing the pass.
+	lost := func() bool {
+		if lease == nil || lease.Held(ctx) {
+			return false
+		}
+		metrics.GatewayWorkerPasses.WithLabelValues("lost").Inc()
+		logger.Of(ctx).Error(errors.New("work lock lost"), zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", "LOCK"))
+		return true
 	}
 	metrics.GatewayWorkerPasses.WithLabelValues("ran").Inc()
 	now := s.now()
@@ -242,6 +302,9 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 		{payment.WorkCloseCheckout, s.closeCheckout},
 	}
 	for _, step := range steps {
+		if lost() {
+			return
+		}
 		list, err := s.payments.ListWork(ctx, s.db, step.kind, now, workBatch)
 		if err != nil {
 			logger.Of(ctx).Error(fmt.Errorf("list %s: %w", step.kind, err), zap.String("event", "gateway.worker_failed"), zap.String("component", "gateway-worker"), zap.String("step", string(step.kind)))
@@ -283,6 +346,9 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 			}
 			s.retry.clear(key)
 		}
+	}
+	if lost() {
+		return
 	}
 	s.refundUnsettled(ctx, now)
 	s.publishPendingStats(ctx, now)
@@ -438,32 +504,40 @@ func (s *Service) expire(ctx context.Context, p *payment.Payment) error {
 }
 
 // refund asks the gateway to refund an approved payment and settles it only once the gateway says so.
-// The payment is read first: the gateway may already have refunded it (from the seller's panel), and a
-// refund request that keeps being refused (the sandbox answers 401, which counts as transient) must not
-// hide that. A permanent refusal is not final either, for the same reason.
 func (s *Service) refund(ctx context.Context, p *payment.Payment) error {
 	if p.GatewayPaymentID == "" {
 		return errors.New("refund requested for a payment without a gateway payment id")
 	}
-	if done, err := s.settleRefund(ctx, p); err != nil || done {
+	return s.driveRefund(ctx, p.GatewayPaymentID, p.ID,
+		func(ctx context.Context) (bool, error) { return s.settleRefund(ctx, p) },
+		func() { s.warnIfRefundIsStuck(ctx, p) })
+}
+
+// driveRefund is the refund of a gateway payment, for the saga refunds and the unsettled ones alike. The
+// payment is read first: the gateway may already have refunded it (from the seller's panel), and a refund
+// request that keeps being refused (the sandbox answers 401, which counts as transient) must not hide
+// that. A permanent refusal is not final either, for the same reason. After a request that went through
+// the payment is read again, since it is usually refunded at once. key is what remembers the request.
+func (s *Service) driveRefund(ctx context.Context, gatewayPaymentID, key string, refunded func(context.Context) (bool, error), warnStuck func()) error {
+	if done, err := refunded(ctx); err != nil || done {
 		return err
 	}
 	var refundErr error
-	if !s.retry.refundSubmitted(p.ID) {
-		if err := s.gateway.Refund(ctx, p.GatewayPaymentID); err != nil {
+	if !s.retry.refundSubmitted(key) {
+		if err := s.gateway.Refund(ctx, gatewayPaymentID); err != nil {
 			if payment.IsTransient(err) {
-				s.warnIfRefundIsStuck(ctx, p)
+				warnStuck()
 				return err
 			}
 			refundErr = err
 		} else {
-			s.retry.markRefundSubmitted(p.ID)
-			if done, err := s.settleRefund(ctx, p); err != nil || done { // usually confirmed at once
+			s.retry.markRefundSubmitted(key)
+			if done, err := refunded(ctx); err != nil || done {
 				return err
 			}
 		}
 	}
-	s.warnIfRefundIsStuck(ctx, p)
+	warnStuck()
 	if refundErr != nil {
 		return refundErr
 	}
@@ -545,33 +619,12 @@ func (s *Service) refundUnsettled(ctx context.Context, now time.Time) {
 	}
 }
 
-// refundOneUnsettled asks the gateway to refund the payment and closes the record only once the gateway
-// says the money is no longer held. Like refund, it reads the payment first, so a refund already made at
-// the gateway closes the record even while the refund request keeps being refused.
+// refundOneUnsettled refunds one unsettled payment (see driveRefund) and closes its record once the gateway
+// says the money is no longer held.
 func (s *Service) refundOneUnsettled(ctx context.Context, u *payment.Unsettled) error {
-	if done, err := s.unsettledIsRefunded(ctx, u); err != nil || done {
-		return err
-	}
-	var refundErr error
-	if !s.retry.refundSubmitted(u.GatewayPaymentID) {
-		if err := s.gateway.Refund(ctx, u.GatewayPaymentID); err != nil {
-			if payment.IsTransient(err) {
-				s.warnUnsettledIsStuck(ctx, u)
-				return err
-			}
-			refundErr = err
-		} else {
-			s.retry.markRefundSubmitted(u.GatewayPaymentID)
-			if done, err := s.unsettledIsRefunded(ctx, u); err != nil || done { // usually confirmed at once
-				return err
-			}
-		}
-	}
-	s.warnUnsettledIsStuck(ctx, u)
-	if refundErr != nil {
-		return refundErr
-	}
-	return errNotYet
+	return s.driveRefund(ctx, u.GatewayPaymentID, u.GatewayPaymentID,
+		func(ctx context.Context) (bool, error) { return s.unsettledIsRefunded(ctx, u) },
+		func() { s.warnUnsettledIsStuck(ctx, u) })
 }
 
 func (s *Service) warnUnsettledIsStuck(ctx context.Context, u *payment.Unsettled) {
@@ -643,7 +696,7 @@ func (s *Service) closeCheckout(ctx context.Context, p *payment.Payment) error {
 
 // sweepUnknownPayments looks once for gateway payments of a payment that closed without ever learning
 // its gateway payment id (a customer who started a Pix while the order was being cancelled). One still
-// in process is cancelled; an approved one is applied, which logs that it needs a manual refund.
+// in process is cancelled; an approved one is applied, which schedules its refund.
 func (s *Service) sweepUnknownPayments(ctx context.Context, p *payment.Payment) error {
 	found, err := s.gateway.FindPayments(ctx, p.ID)
 	if err != nil {
