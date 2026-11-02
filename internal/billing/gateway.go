@@ -284,10 +284,11 @@ func (s *Service) reconcile(ctx context.Context, p *payment.Payment) error {
 		return err
 	}
 	rank := func(gp payment.GatewayPayment) int {
-		switch st, _ := payment.MapGatewayStatus(gp.Status); {
-		case st == payment.StatusApproved:
+		st, _ := payment.MapGatewayStatus(gp.Status)
+		switch st {
+		case payment.StatusApproved:
 			return 0
-		case st == payment.StatusPending:
+		case payment.StatusPending:
 			return 1
 		}
 		return 2

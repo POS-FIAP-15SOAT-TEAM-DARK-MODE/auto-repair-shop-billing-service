@@ -19,7 +19,7 @@ var payCols = []string{"id", "budget_id", "service_order_id", "saga_id", "amount
 
 func TestPostgres_Create(t *testing.T) {
 	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectExec("INSERT INTO payment").
 		WithArgs("p1", "b1", "SO-1", "saga-1", "221.00", "PENDING", "internal", nil).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -36,7 +36,7 @@ func TestPostgres_Create(t *testing.T) {
 func TestPostgres_FindByID(t *testing.T) {
 	now := time.Now()
 	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	mock.ExpectQuery("FROM payment WHERE id").WithArgs("p1").
 		WillReturnRows(sqlmock.NewRows(payCols).AddRow("p1", "b1", "SO-1", "saga-1", "221.00", "APPROVED", "internal", now, now, nil, nil, nil, nil, nil, nil))
@@ -62,7 +62,7 @@ func TestPostgres_FindByID(t *testing.T) {
 func TestPostgres_FindLatestByServiceOrder(t *testing.T) {
 	now := time.Now()
 	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	mock.ExpectQuery("ORDER BY created_at DESC").WithArgs("SO-1").
 		WillReturnRows(sqlmock.NewRows(payCols).AddRow("p2", "b1", "SO-1", "saga-1", "10.00", "PENDING", "internal", now, now, nil, nil, nil, nil, nil, nil))
@@ -77,7 +77,7 @@ func TestPostgres_FindLatestByServiceOrder(t *testing.T) {
 
 func TestPostgres_Update(t *testing.T) {
 	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectExec("UPDATE payment SET status").WithArgs("p1", "REFUNDED", nil, nil, nil, nil, nil).WillReturnResult(sqlmock.NewResult(0, 1))
 	require.NoError(t, NewPostgres().Update(context.Background(), db, &payment.Payment{ID: "p1", Status: payment.StatusRefunded}))
 
@@ -93,7 +93,7 @@ func TestPostgres_Update(t *testing.T) {
 
 func TestPostgres_CreateStoresTheExpiry(t *testing.T) {
 	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	at := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
 	mock.ExpectExec("INSERT INTO payment").
 		WithArgs("p1", "b1", "SO-1", "saga-1", "10.00", "PENDING", "mercadopago", at).
@@ -108,7 +108,7 @@ func TestPostgres_FindByIDLoadsTheGatewayFields(t *testing.T) {
 	now := time.Now()
 	exp := now.Add(48 * time.Hour)
 	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectQuery("FROM payment WHERE id").WithArgs("p1").WillReturnRows(sqlmock.NewRows(payCols).
 		AddRow("p1", "b1", "SO-1", "saga-1", "10.00", "PENDING", "mercadopago", now, now, "pref-1", "1001", "https://mp/init", exp, nil, nil))
 	got, err := NewPostgres().FindByID(context.Background(), db, "p1")
@@ -125,7 +125,7 @@ func TestPostgres_FindByIDLoadsTheGatewayFields(t *testing.T) {
 func TestPostgres_FindByIDForUpdateLocksTheRow(t *testing.T) {
 	now := time.Now()
 	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectQuery("FROM payment WHERE id = \\$1 FOR UPDATE").WithArgs("p1").
 		WillReturnRows(sqlmock.NewRows(payCols).AddRow("p1", "b1", "SO-1", "saga-1", "10.00", "PENDING", "internal", now, now, nil, nil, nil, nil, nil, nil))
 	got, err := NewPostgres().FindByIDForUpdate(context.Background(), db, "p1")
@@ -157,7 +157,7 @@ func TestPostgres_ListWork(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(string(tt.kind), func(t *testing.T) {
 			db, mock, _ := sqlmock.New()
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			mock.ExpectQuery(tt.match).WithArgs(tt.args...).WillReturnRows(row(sqlmock.NewRows(payCols)))
 			got, err := NewPostgres().ListWork(context.Background(), db, tt.kind, now, 20)
 			require.NoError(t, err)
@@ -169,7 +169,7 @@ func TestPostgres_ListWork(t *testing.T) {
 
 	t.Run("errors", func(t *testing.T) {
 		db, mock, _ := sqlmock.New()
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 		_, err := NewPostgres().ListWork(context.Background(), db, payment.WorkKind("NOPE"), now, 1)
 		assert.Error(t, err)
 
@@ -186,7 +186,7 @@ func TestPostgres_ListWork(t *testing.T) {
 
 func TestPostgres_MarkChecked(t *testing.T) {
 	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	at := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
 	mock.ExpectExec("UPDATE payment SET last_checked_at").WithArgs("p1", at).WillReturnResult(sqlmock.NewResult(0, 1))
 	require.NoError(t, NewPostgres().MarkChecked(context.Background(), db, "p1", at))
@@ -196,7 +196,7 @@ func TestPostgres_MarkChecked(t *testing.T) {
 
 func TestPostgres_ListWorkServesTheLeastRecentlyCheckedFirst(t *testing.T) {
 	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectQuery("ORDER BY last_checked_at NULLS FIRST").WithArgs(20, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows(payCols))
 	_, err := NewPostgres().ListWork(context.Background(), db, payment.WorkReconcile, time.Now(), 20)
 	require.NoError(t, err)

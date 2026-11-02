@@ -71,7 +71,7 @@ func (r *Postgres) ListWork(ctx context.Context, ex db.Executor, kind payment.Wo
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []*payment.Payment
 	for rows.Next() {
