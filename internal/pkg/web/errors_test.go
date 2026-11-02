@@ -26,6 +26,9 @@ func TestError_StatusMapping(t *testing.T) {
 		{"data conflict", app.ErrDataConflict, http.StatusConflict, app.ErrDataConflict.Error()},
 		{"data violation", app.ErrDataViolation, http.StatusUnprocessableEntity, app.ErrDataViolation.Error()},
 		{"json syntax", jsonv2.ErrJSONSyntax, http.StatusBadRequest, ""},
+		{"gateway managed payment", payment.ErrGatewayManaged, http.StatusConflict, payment.ErrGatewayManaged.Error()},
+		{"invalid webhook signature", payment.ErrInvalidSignature, http.StatusUnauthorized, "Unauthorized"},
+		{"invalid webhook notification", payment.ErrInvalidNotification, http.StatusBadRequest, payment.ErrInvalidNotification.Error()},
 		{"unknown", errors.New("boom"), http.StatusInternalServerError, "boom"},
 	}
 	for _, tc := range cases {

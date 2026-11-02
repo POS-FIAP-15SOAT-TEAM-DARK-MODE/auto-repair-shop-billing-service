@@ -42,6 +42,19 @@ func (s *Service) WithGateway(cfg GatewayConfig) *Service {
 	return s
 }
 
+// HandleGatewayNotification handles a payment notification: it never trusts the notification body,
+// it reads the payment from the gateway and applies it. A failure is returned so the gateway retries.
+func (s *Service) HandleGatewayNotification(ctx context.Context, gatewayPaymentID string) (ApplyResult, error) {
+	if s.gateway == nil {
+		return ResultIgnored, errors.New("payment gateway not configured")
+	}
+	gp, err := s.gateway.GetPayment(ctx, gatewayPaymentID)
+	if err != nil {
+		return ResultIgnored, err
+	}
+	return s.ApplyGatewayPayment(ctx, gp)
+}
+
 func (s *Service) providerName() string {
 	if s.gateway != nil {
 		return payment.ProviderMercadoPago

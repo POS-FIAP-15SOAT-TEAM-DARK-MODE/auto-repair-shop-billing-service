@@ -31,8 +31,10 @@ func Error(err error) (int, errorResponse) {
 // getHTTPStatus determines the HTTP status code for a given error.
 func getHTTPStatus(err error) int {
 	switch {
-	case isBadRequestError(err), IsJoined(err):
+	case isBadRequestError(err), IsJoined(err), errors.Is(err, payment.ErrInvalidNotification):
 		return http.StatusBadRequest
+	case errors.Is(err, payment.ErrInvalidSignature):
+		return http.StatusUnauthorized
 	case isNotFoundError(err):
 		return http.StatusNotFound
 	case isInternalServerError(err):
@@ -60,6 +62,8 @@ func buildErrorMessages(err error, status int) ([]string, string) {
 	switch status {
 	case http.StatusBadRequest:
 		return unwrapAll(err), ""
+	case http.StatusUnauthorized:
+		return nil, "Unauthorized"
 	case http.StatusNotFound:
 		return nil, err.Error()
 	case http.StatusConflict, http.StatusUnprocessableEntity, http.StatusInternalServerError:

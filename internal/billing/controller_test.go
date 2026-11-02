@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/budget"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/payment"
 	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/auth"
+	"github.com/POS-FIAP-15SOAT-TEAM-DARK-MODE/auto-repair-shop-billing-service/internal/pkg/web"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -136,4 +139,132 @@ func TestToResponses(t *testing.T) {
 
 	p := toPaymentResponse(&payment.Payment{ID: "p", Amount: decimal.RequireFromString("9.5"), Status: payment.StatusApproved})
 	assert.Equal(t, "9.50", p.Amount)
+}
+
+// ---- webhook ----
+
+type fakeVerifier struct {
+	err       error
+	gotSig    string
+	gotReq    string
+	gotDataID string
+}
+
+func (f *fakeVerifier) Verify(sig, reqID, dataID string) error {
+	f.gotSig, f.gotReq, f.gotDataID = sig, reqID, dataID
+	return f.err
+}
+
+func webhookRequest(query, body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/mercadopago?"+query, strings.NewReader(body))
+	req.Header.Set("x-signature", "ts=1,v1=abc")
+	req.Header.Set("x-request-id", "req-9")
+	return req
+}
+
+func newWebhookController(t *testing.T, v *fakeVerifier) (*Controller, *gatewayHarness) {
+	t.Helper()
+	g := newGatewayHarness(t)
+	return NewController(g.svc).WithWebhook(v), g
+}
+
+func TestWebhook_AppliesThePaymentReadFromTheGateway(t *testing.T) {
+	v := &fakeVerifier{}
+	c, g := newWebhookController(t, v)
+	g.seedGatewayPayment(withCheckout)
+	g.gw.byID["186237542593"] = gp("186237542593", "approved", "221")
+	g.tx(1)
+
+	resp, err := c.Webhook(context.Background(), webhookRequest("data.id=186237542593&type=payment", `{"type":"payment","data":{"id":"186237542593"}}`))
+	require.NoError(t, err)
+	assert.Equal(t, "applied", resp.Result)
+	assert.Equal(t, payment.StatusApproved, g.reload().Status)
+	assert.Equal(t, "186237542593", v.gotDataID, "the signed id is the one in the query string")
+	assert.Equal(t, "ts=1,v1=abc", v.gotSig)
+	assert.Equal(t, "req-9", v.gotReq)
+	g.assertDB()
+}
+
+func TestWebhook_FallsBackToTheIdInTheBodyAndTheTypeInTheBody(t *testing.T) {
+	v := &fakeVerifier{}
+	c, g := newWebhookController(t, v)
+	g.seedGatewayPayment(withCheckout)
+	g.gw.byID["77"] = gp("77", "in_process", "221")
+	g.tx(0)
+	resp, err := c.Webhook(context.Background(), webhookRequest("", `{"type":"payment","data":{"id":77}}`))
+	require.NoError(t, err)
+	assert.Equal(t, "duplicate", resp.Result)
+	assert.Equal(t, "77", v.gotDataID)
+}
+
+func TestWebhook_RejectsABadSignatureBeforeDoingAnything(t *testing.T) {
+	v := &fakeVerifier{err: errors.New("SignatureMismatch")}
+	c, g := newWebhookController(t, v)
+	g.seedGatewayPayment(withCheckout)
+	g.gw.byID["1"] = gp("1", "approved", "221")
+
+	_, err := c.Webhook(context.Background(), webhookRequest("data.id=1&type=payment", `{}`))
+	assert.ErrorIs(t, err, payment.ErrInvalidSignature)
+	assert.Equal(t, payment.StatusPending, g.reload().Status)
+	g.assertDB() // no transaction was opened
+}
+
+func TestWebhook_IgnoresOtherTypesAndRejectsAnInvalidId(t *testing.T) {
+	c, g := newWebhookController(t, &fakeVerifier{})
+	resp, err := c.Webhook(context.Background(), webhookRequest("data.id=5&type=merchant_order", `{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "ignored", resp.Result)
+
+	for _, q := range []string{"type=payment", "data.id=abc&type=payment", "data.id=-5&type=payment"} {
+		_, err = c.Webhook(context.Background(), webhookRequest(q, `{}`))
+		assert.ErrorIs(t, err, payment.ErrInvalidNotification, q)
+	}
+	g.assertDB()
+}
+
+func TestWebhook_GatewayFailuresAreReturnedSoTheGatewayRetries(t *testing.T) {
+	c, g := newWebhookController(t, &fakeVerifier{})
+	g.gw.getErr = transient
+	_, err := c.Webhook(context.Background(), webhookRequest("data.id=1&type=payment", `{}`))
+	assert.ErrorIs(t, err, transient)
+	status, _ := web.Error(err)
+	assert.Equal(t, http.StatusInternalServerError, status)
+}
+
+func TestWebhook_UnreadableBody(t *testing.T) {
+	c, _ := newWebhookController(t, &fakeVerifier{})
+	req := webhookRequest("data.id=1&type=payment", `{}`)
+	req.Body = io.NopCloser(errReader{})
+	_, err := c.Webhook(context.Background(), req)
+	assert.ErrorIs(t, err, payment.ErrInvalidNotification)
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("read boom") }
+
+func TestWebhookEnabledOnlyWithAVerifierAndAGateway(t *testing.T) {
+	h := newHarness(t, &fakeProvider{})
+	assert.False(t, NewController(h.svc).WebhookEnabled(), "internal modes have no webhook")
+	assert.False(t, NewController(h.svc).WithWebhook(&fakeVerifier{}).WebhookEnabled(), "a verifier without a gateway")
+	g := newGatewayHarness(t)
+	assert.False(t, NewController(g.svc).WebhookEnabled(), "a gateway without a verifier")
+	assert.True(t, NewController(g.svc).WithWebhook(&fakeVerifier{}).WebhookEnabled())
+}
+
+func TestHandleGatewayNotificationWithoutAGateway(t *testing.T) {
+	h := newHarness(t, &fakeProvider{})
+	_, err := h.svc.HandleGatewayNotification(context.Background(), "1")
+	assert.Error(t, err)
+}
+
+func TestToPaymentResponse_CarriesTheCheckoutOfAGatewayPayment(t *testing.T) {
+	exp := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	got := toPaymentResponse(&payment.Payment{ID: "p", Amount: decimal.RequireFromString("10"), Status: payment.StatusPending,
+		Provider: payment.ProviderMercadoPago, CheckoutURL: "https://mp/init", ExpiresAt: &exp})
+	assert.Equal(t, "https://mp/init", got.CheckoutURL)
+	require.NotNil(t, got.ExpiresAt)
+	raw, err := json.Marshal(toPaymentResponse(&payment.Payment{ID: "p", Amount: decimal.RequireFromString("10")}))
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "checkout_url", "internal payments keep the response they had")
 }

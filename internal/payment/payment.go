@@ -34,6 +34,10 @@ var (
 	// ErrGatewayManaged is returned when the attendant tries to confirm or reject a payment that has a
 	// checkout at the gateway: the gateway is the source of truth for its status.
 	ErrGatewayManaged = errors.New("payment is managed by the payment gateway")
+	// ErrInvalidSignature is returned for a webhook whose x-signature does not verify.
+	ErrInvalidSignature = errors.New("invalid webhook signature")
+	// ErrInvalidNotification is returned for a webhook without a usable payment id.
+	ErrInvalidNotification = errors.New("invalid webhook notification")
 )
 
 // allowed lists the valid next states of each status.
