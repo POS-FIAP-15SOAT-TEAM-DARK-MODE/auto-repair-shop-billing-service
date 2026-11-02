@@ -61,7 +61,7 @@ make up            # docker compose: app, Postgres, migrations, MiniStack and to
 curl -fsS http://localhost:8083/ping
 make down
 ```
-Without Docker: `make test`, `make test-integration` (needs Postgres and MiniStack; see CI), `make coverage`.
+Without Docker: `make test`, `make test-integration` (needs Postgres and MiniStack; see CI), `make coverage`. `make test-sandbox` is an opt-in smoke test of the Mercado Pago gateway against the real sandbox (needs `MERCADOPAGO_ACCESS_TOKEN`; the CI does not run it).
 
 ## Messaging resources (local, prefix `auto-repair-shop-local-`)
 `saga-commands` (topic) → `billing-queue` (filter `target=billing`, DLQ after 5 receives); `billing-events` (topic).
