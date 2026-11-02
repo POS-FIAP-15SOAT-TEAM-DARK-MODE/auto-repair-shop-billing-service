@@ -329,3 +329,31 @@ func TestGateway_ManualConfirmIsRefusedOnceTheCheckoutExists(t *testing.T) {
 	assert.ErrorIs(t, e.svc.Confirm(e.ctx, p.ID, "req-1"), payment.ErrGatewayManaged)
 	assert.Equal(t, payment.StatusPending, e.reload().Status)
 }
+
+func TestGateway_ListWorkServesTheLeastRecentlyCheckedFirstOnPostgres(t *testing.T) {
+	e := setupGateway(t)
+	repo := paymentRepo.NewPostgres()
+	for _, so := range []string{"A", "B", "C"} {
+		_, err := e.db.ExecContext(e.ctx, `INSERT INTO payment (id, budget_id, service_order_id, saga_id, amount, status, provider, external_id)
+			VALUES ($1, $2, $3, $4, 10, 'PENDING', 'mercadopago', $5)`, "pay-"+so, e.budget.ID, "SO-"+so, "saga-"+so, "pref-"+so)
+		require.NoError(t, err)
+	}
+	ids := func(now time.Time) []string {
+		list, err := repo.ListWork(e.ctx, e.db, payment.WorkReconcile, now, 2)
+		require.NoError(t, err)
+		var out []string
+		for _, p := range list {
+			out = append(out, p.ID)
+		}
+		return out
+	}
+	now := time.Now().UTC()
+	assert.Equal(t, []string{"pay-A", "pay-B"}, ids(now), "never checked: creation order")
+
+	require.NoError(t, repo.MarkChecked(e.ctx, e.db, "pay-A", now))
+	require.NoError(t, repo.MarkChecked(e.ctx, e.db, "pay-B", now))
+	assert.Equal(t, []string{"pay-C"}, ids(now), "the ones just checked wait for the reconcile interval")
+
+	later := now.Add(payment.ReconcileEvery + time.Second)
+	assert.Equal(t, []string{"pay-C", "pay-A"}, ids(later), "never checked first, then the oldest check")
+}

@@ -50,6 +50,7 @@ type Gateway interface {
 // 429 and 5xx are transient; the other 4xx answers are permanent.
 type GatewayError struct {
 	Transient bool
+	NotFound  bool // the gateway answered 404
 	Err       error
 }
 
@@ -82,4 +83,10 @@ func MapGatewayStatus(gateway string) (Status, bool) {
 	default:
 		return "", false
 	}
+}
+
+// IsNotFound reports whether the gateway said it does not know the resource (404).
+func IsNotFound(err error) bool {
+	var ge *GatewayError
+	return errors.As(err, &ge) && ge.NotFound
 }

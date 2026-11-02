@@ -781,7 +781,7 @@ func TestGateway_ClosingRetriesWhenTheLookForUnknownPaymentsFails(t *testing.T) 
 
 func TestGateway_NotificationForAnUnknownGatewayPaymentIsAcknowledged(t *testing.T) {
 	g := newGatewayHarness(t)
-	g.gw.getErr = &payment.GatewayError{Transient: false, Err: errors.New("not found")}
+	g.gw.getErr = &payment.GatewayError{NotFound: true, Err: errors.New("not found")}
 	res, err := g.svc.HandleGatewayNotification(context.Background(), "999")
 	require.NoError(t, err)
 	assert.Equal(t, ResultUnknown, res)
@@ -789,6 +789,10 @@ func TestGateway_NotificationForAnUnknownGatewayPaymentIsAcknowledged(t *testing
 	g.gw.getErr = transient
 	_, err = g.svc.HandleGatewayNotification(context.Background(), "999")
 	assert.ErrorIs(t, err, transient, "a transient failure makes the gateway retry")
+
+	g.gw.getErr = permanent // refused for another reason than "not found": not acknowledged
+	_, err = g.svc.HandleGatewayNotification(context.Background(), "999")
+	assert.ErrorIs(t, err, permanent)
 }
 
 func TestGateway_ManualDecisionIsRefusedBeforeTheCheckoutExistsToo(t *testing.T) {
@@ -798,4 +802,53 @@ func TestGateway_ManualDecisionIsRefusedBeforeTheCheckoutExistsToo(t *testing.T)
 	g.mock.ExpectRollback()
 	assert.ErrorIs(t, g.svc.Confirm(context.Background(), "pay-1", "req-1"), payment.ErrGatewayManaged)
 	g.assertDB()
+}
+
+func TestGateway_AnotherApprovalIsAppliedEvenWhenAnEarlierOneCannotBeSettled(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	g.gw.found = []payment.GatewayPayment{gp("1001", "approved", "200"), gp("1002", "approved", "221")}
+	g.tx(0) // 1001: another amount, ignored
+	g.tx(1) // 1002: settles
+
+	err := g.svc.reconcile(context.Background(), g.reload())
+
+	assert.ErrorContains(t, err, "1001", "the unsettled approval is still reported")
+	assert.Equal(t, payment.StatusApproved, g.reload().Status)
+	assert.Equal(t, "1002", g.reload().GatewayPaymentID)
+	g.assertDB()
+}
+
+func TestGateway_ExpiryWithoutAnyCheckoutCancelsLocally(t *testing.T) {
+	g := newGatewayHarness(t)
+	p := g.seedGatewayPayment(func(p *payment.Payment) { exp := t0.Add(-time.Hour); p.ExpiresAt = &exp })
+	g.gw.createErr = &payment.GatewayError{Transient: true, Err: errors.New("401 unauthorized")} // the token never worked
+	g.tx(1)                                                                                      // PaymentFailed
+	require.NoError(t, g.svc.expire(context.Background(), p))
+	assert.Equal(t, payment.StatusCancelled, g.reload().Status)
+	assert.Zero(t, g.gw.finds, "there is no checkout to look at")
+}
+
+func TestGateway_ClosingStillExpiresTheCheckoutWhenTheSearchIsRefusedForGood(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(func(p *payment.Payment) { withCheckout(p); p.Status = payment.StatusCancelled })
+	g.gw.findErr = permanent
+	g.tx(0)
+	g.svc.ProcessGatewayWork(context.Background())
+	assert.Equal(t, []string{"pref-1"}, g.gw.expired)
+	assert.NotNil(t, g.reload().CheckoutClosedAt)
+	g.assertDB()
+}
+
+func TestGateway_PaymentsInBackoffGoToTheBackOfTheLine(t *testing.T) {
+	g := newGatewayHarness(t)
+	g.seedGatewayPayment(withCheckout)
+	g.gw.findErr = transient
+	g.svc.ProcessGatewayWork(context.Background()) // fails: backoff
+	g.now = g.now.Add(time.Second)
+	g.svc.ProcessGatewayWork(context.Background()) // skipped by the backoff, still stamped
+	got, err := g.payments.ListWork(context.Background(), nil, payment.WorkReconcile, g.now.Add(time.Hour), 1)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, 1, g.gw.finds)
 }

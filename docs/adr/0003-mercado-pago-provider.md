@@ -65,6 +65,10 @@ not hold the database transaction of a command. The saga, its message contracts 
   30 seconds. A gateway answer of 401, 403, 408 or 409 is retried (a rotated token must not fail customers'
   payments); only 400, 404 and 422 are permanent. A refused refund reads the payment before giving up, a
   payment that closes without knowing its gateway payment id is searched once, an approval that cannot be
-  settled makes the worker back off, and a live attempt is not overridden by an older refusal.
+  settled makes the worker back off, and a live attempt is not overridden by an older refusal. A payment in backoff is stamped too, so it
+  goes to the back of the line. An approval that cannot be settled keeps the payment `PENDING` for a person (the
+  expiry does not cancel a payment the customer was charged for), while another matching approval is still
+  applied. A checkout that never opened expires locally without asking the gateway. Only a 404 makes a
+  notification "unknown" (200); other refusals make Mercado Pago retry.
 - The backoff and the "refund already submitted" marker live in memory. After a restart a step simply runs
   again, which is safe because the gateway calls are idempotent.

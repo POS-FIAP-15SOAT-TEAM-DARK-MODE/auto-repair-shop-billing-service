@@ -50,8 +50,8 @@ func (s *Service) HandleGatewayNotification(ctx context.Context, gatewayPaymentI
 	}
 	gp, err := s.gateway.GetPayment(ctx, gatewayPaymentID)
 	if err != nil {
-		if !payment.IsTransient(err) {
-			// the gateway does not know the payment (or refuses the request for good): a retry cannot help
+		if payment.IsNotFound(err) {
+			// the gateway does not know the payment: a retry cannot help
 			logger.Of(ctx).Warn("gateway payment of a notification not found", zap.String("gateway_payment_id", gatewayPaymentID), zap.Error(err))
 			return ResultUnknown, nil
 		}
@@ -196,6 +196,10 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 		for _, p := range list {
 			key := string(step.kind) + ":" + p.ID
 			if !s.retry.ready(key, now) {
+				// a payment waiting for its backoff goes to the back of the line, or it would keep a slot of every batch
+				if err := s.payments.MarkChecked(ctx, s.db, p.ID, now); err != nil {
+					logger.Of(ctx).Error(err, zap.String("component", "gateway-worker"), zap.String("payment_id", p.ID))
+				}
 				continue
 			}
 			err := step.run(ctx, p)
@@ -295,6 +299,7 @@ func (s *Service) reconcile(ctx context.Context, p *payment.Payment) error {
 	}
 	sort.SliceStable(found, func(i, j int) bool { return rank(found[i]) < rank(found[j]) })
 	live := len(found) > 0 && rank(found[0]) <= 1
+	var unsettled error
 	for _, gp := range found {
 		if live && rank(gp) == 2 {
 			continue
@@ -304,17 +309,21 @@ func (s *Service) reconcile(ctx context.Context, p *payment.Payment) error {
 		if err != nil {
 			return err
 		}
-		if res == ResultIgnored && rank(gp) == 0 {
-			return fmt.Errorf("approved gateway payment %s was not settled: needs manual review", gp.ID)
+		if res == ResultIgnored && rank(gp) == 0 && unsettled == nil {
+			unsettled = fmt.Errorf("approved gateway payment %s was not settled: needs manual review", gp.ID)
 		}
 	}
-	return nil
+	return unsettled // after the loop, so another approval that matches is still applied
 }
 
 // expire ends a checkout whose lifetime has passed. A payment that never reached the gateway is
 // CANCELLED; a payment the gateway still holds (for example in_process) is cancelled there first and
 // then REJECTED. Both answer the saga with PaymentFailed. An approval found first always wins.
 func (s *Service) expire(ctx context.Context, p *payment.Payment) error {
+	if p.ExternalID == "" {
+		// no checkout was ever opened (the gateway kept refusing us), so there is nothing to look for
+		return s.settle(ctx, p.ID, payment.StatusCancelled, func(pay *payment.Payment) bool { return pay.ExternalID == "" })
+	}
 	if err := s.reconcile(ctx, p); err != nil {
 		return err
 	}
@@ -405,7 +414,12 @@ func (s *Service) closeCheckout(ctx context.Context, p *payment.Payment) error {
 func (s *Service) sweepUnknownPayments(ctx context.Context, p *payment.Payment) error {
 	found, err := s.gateway.FindPayments(ctx, p.ID)
 	if err != nil {
-		return err
+		if payment.IsTransient(err) {
+			return err
+		}
+		// the search is refused for good: say so and still close the checkout
+		logger.Of(ctx).Error(err, zap.String("component", "gateway-worker"), zap.String("payment_id", p.ID))
+		return nil
 	}
 	for _, gp := range found {
 		gp.ExternalReference = p.ID

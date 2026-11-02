@@ -149,12 +149,12 @@ func numericID(id string) (int, error) {
 // classify wraps an SDK error with context and the transient/permanent verdict. Answers with a
 // status code are permanent unless 429 or 5xx; anything without one (network, timeout) is transient.
 func classify(op string, err error) error {
-	transient := true
+	transient, notFound := true, false
 	var re *mperror.ResponseError
 	if errors.As(err, &re) {
-		transient = isTransientStatus(re.StatusCode)
+		transient, notFound = isTransientStatus(re.StatusCode), re.StatusCode == 404
 	}
-	return &payment.GatewayError{Transient: transient, Err: fmt.Errorf("%s: %w", op, err)}
+	return &payment.GatewayError{Transient: transient, NotFound: notFound, Err: fmt.Errorf("%s: %w", op, err)}
 }
 
 // isTransientStatus says which HTTP answers are worth retrying. Besides 429 and 5xx, a 401 or 403 (a
