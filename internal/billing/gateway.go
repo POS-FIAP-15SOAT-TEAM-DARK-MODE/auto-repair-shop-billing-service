@@ -105,7 +105,7 @@ func (s *Service) ApplyGatewayPayment(ctx context.Context, gp payment.GatewayPay
 }
 
 func (s *Service) applyLocked(ctx context.Context, tx *sql.Tx, pay *payment.Payment, gp payment.GatewayPayment, target payment.Status) (ApplyResult, error) {
-	base := []zap.Field{zap.String("payment_id", pay.ID), zap.String("service_order_id", pay.ServiceOrderID), zap.String("gateway_payment_id", gp.ID)}
+	base := []zap.Field{zap.String("payment_id", pay.ID), zap.String("saga_id", pay.SagaID), zap.String("service_order_id", pay.ServiceOrderID), zap.String("gateway_payment_id", gp.ID)}
 	fields := func(extra ...zap.Field) []zap.Field { return append(slices.Clone(base), extra...) }
 
 	switch {
@@ -221,7 +221,7 @@ func (s *Service) ProcessGatewayWork(ctx context.Context) {
 }
 
 func (s *Service) logStepError(ctx context.Context, kind payment.WorkKind, p *payment.Payment, err error) {
-	fields := []zap.Field{zap.String("component", "gateway-worker"), zap.String("step", string(kind)), zap.String("payment_id", p.ID)}
+	fields := []zap.Field{zap.String("component", "gateway-worker"), zap.String("step", string(kind)), zap.String("payment_id", p.ID), zap.String("saga_id", p.SagaID), zap.String("service_order_id", p.ServiceOrderID)}
 	if errors.Is(err, errNotYet) {
 		logger.Of(ctx).Debug("waiting for the gateway", fields...)
 		return
