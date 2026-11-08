@@ -195,6 +195,15 @@ jobs:
           if [ "$LAB_MODE" = "true" ] && [ "$MERCADOPAGO_ENABLED" = "true" ]; then
             kubectl -n auto-repair-shop patch configmap billing-service-config --type merge \
               -p '{"data":{"PAYMENT_MODE":"mercadopago"}}'
+            # The API Gateway gives the lab its public HTTPS URL; without it the lab settles through the reconciliation.
+            API_ENDPOINT=$(aws apigatewayv2 get-apis --region "$DEPLOY_REGION" \
+              --query "Items[?Name=='auto-repair-shop-${ENV_NAME}-gateway'].ApiEndpoint | [0]" --output text)
+            if [ -n "$API_ENDPOINT" ] && [ "$API_ENDPOINT" != "None" ]; then
+              kubectl -n auto-repair-shop patch configmap billing-service-config --type merge \
+                -p "{\"data\":{\"MERCADOPAGO_NOTIFICATION_URL\":\"$API_ENDPOINT/$ENV_NAME/v1/webhooks/mercadopago\"}}"
+            else
+              echo "No API Gateway yet: the webhook URL stays empty and payments settle through the reconciliation"
+            fi
           fi
           kubectl -n auto-repair-shop set image deploy/billing-service \
             app=${{ needs.publish.outputs.image }}
