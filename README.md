@@ -48,6 +48,8 @@ With several replicas only one runs the worker at a time (a Postgres advisory lo
 
 What to watch (`/metrics`, details in `.ai/rules/observability.md`): `refunds_pending_oldest_age_seconds` (a refund the gateway never confirmed; alert past about 30 minutes), `payments_unsettled_total{reason="amount_mismatch"}` (needs a person), `gateway_worker_passes_total{result="ran"}` (alert if no replica runs) and `gateway_requests_total{outcome!="ok"}`.
 
+Lab deploy (optional): the `Docker` workflow switches the lab to this mode when `MERCADOPAGO_ACCESS_TOKEN` (and `MERCADOPAGO_WEBHOOK_SECRET`) exist as GitHub secrets visible to this repository, preferably organization secrets restricted to it. The deploy adds them to `billing-service-secrets` and sets `PAYMENT_MODE=mercadopago` in the ConfigMap; without them the lab overlay keeps `auto-approve`. `stg` and `prd` keep reading their credentials from Secrets Manager. A deploy of the same image does not restart the pods: restart the deployment after changing the secrets. The lab has no public HTTPS URL, so payments settle through the reconciliation, not the webhook.
+
 Known limit: the refund through the Mercado Pago API answers `401` ("Unauthorized use of live credentials") in the sandbox, so refunds are retried with a backoff until the gateway reports them refunded (for example after a refund from the seller's panel). Tests use a fake SDK transport and never call Mercado Pago; `make test-sandbox` is the opt-in exception.
 
 ## REST API
