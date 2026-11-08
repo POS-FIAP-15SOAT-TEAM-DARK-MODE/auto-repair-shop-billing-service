@@ -155,6 +155,24 @@ jobs:
           kubectl -n auto-repair-shop create secret generic billing-service-secrets "${ARGS[@]}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      # Optional: with MERCADOPAGO_ACCESS_TOKEN (and MERCADOPAGO_WEBHOOK_SECRET) set as organization secrets
+      # shared with this repository, the lab runs the Mercado Pago mode. Without them nothing changes and
+      # the lab overlay keeps its payment mode. stg and prd read their credentials from Secrets Manager.
+      - name: Add the Mercado Pago credentials (lab)
+        if: env.LAB_MODE == 'true'
+        env:
+          MP_TOKEN: ${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}
+          MP_WEBHOOK_SECRET: ${{ secrets.MERCADOPAGO_WEBHOOK_SECRET }}
+        run: |
+          if [ -z "$MP_TOKEN" ]; then
+            echo "No Mercado Pago credentials: the lab keeps its payment mode"
+            exit 0
+          fi
+          kubectl -n auto-repair-shop patch secret billing-service-secrets --type merge \
+            -p "$(jq -n --arg token "$MP_TOKEN" --arg webhook "$MP_WEBHOOK_SECRET" \
+              '{stringData: {MERCADOPAGO_ACCESS_TOKEN: $token, MERCADOPAGO_WEBHOOK_SECRET: $webhook}}')" >/dev/null
+          echo "Mercado Pago credentials added to billing-service-secrets"
+
       - name: Resolve messaging endpoints
         run: |
           ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
@@ -164,6 +182,8 @@ jobs:
           echo "BILLING_QUEUE_URL=$QUEUE_URL" >> "$GITHUB_ENV"
 
       - name: Deploy
+        env:
+          MERCADOPAGO_ENABLED: ${{ secrets.MERCADOPAGO_ACCESS_TOKEN != '' && 'true' || 'false' }}
         run: |
           OVERLAY="${{ steps.overlay.outputs.path }}"
           if [ "$LAB_MODE" = "true" ]; then
@@ -172,6 +192,10 @@ jobs:
           kubectl apply -k "$OVERLAY"
           kubectl -n auto-repair-shop patch configmap billing-service-config --type merge \
             -p "{\"data\":{\"POSTGRES_HOST\":\"$DEPLOY_RDS\",\"BILLING_QUEUE_URL\":\"$BILLING_QUEUE_URL\",\"BILLING_EVENTS_TOPIC_ARN\":\"$BILLING_EVENTS_TOPIC_ARN\"}}"
+          if [ "$LAB_MODE" = "true" ] && [ "$MERCADOPAGO_ENABLED" = "true" ]; then
+            kubectl -n auto-repair-shop patch configmap billing-service-config --type merge \
+              -p '{"data":{"PAYMENT_MODE":"mercadopago"}}'
+          fi
           kubectl -n auto-repair-shop set image deploy/billing-service \
             app=${{ needs.publish.outputs.image }}
 
