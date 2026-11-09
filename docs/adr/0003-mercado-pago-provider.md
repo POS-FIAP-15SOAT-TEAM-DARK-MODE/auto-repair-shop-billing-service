@@ -81,8 +81,8 @@ not hold the database transaction of a command. The saga, its message contracts 
   and the closing cover payments with or without a stored `external_id`; closing one without it asks the gateway
   for the checkout (`FindCheckout`) and expires what it finds. The creation step does not stamp
   `last_checked_at`, so a payment whose creation keeps failing is still reconciled.
-- **A refund reads the payment first.** The sandbox answers `401` to every refund request, which counts as
-  transient. Reading before asking lets a refund made from the seller's panel settle the payment (or close the
+- **A refund reads the payment first.** The sandbox answered `401` to refund requests in the POC and the first live tests (it worked on
+  2026-11-08, see the known gaps), and a `401` counts as transient. Reading before asking lets a refund made from the seller's panel settle the payment (or close the
   unsettled record) without a webhook, and lets the stuck-refund warning fire even while the request is refused.
   This was found in the live test of decision 6.
 - **An approval that cannot be settled** keeps the payment `PENDING` for a person: the expiry does not cancel a
@@ -103,7 +103,9 @@ not hold the database transaction of a command. The saga, its message contracts 
 
 ### Known gaps (listed in the RFC)
 - The refund through the Mercado Pago API returned `401 code 7` ("Unauthorized use of live credentials") in
-  the sandbox, in the POC and in the live test of this service. Refunds, including the ones of unsettled
+  the sandbox, in the POC and in the live test of this service. On 2026-11-08, in the AWS Lab with the test
+  credentials of the seller user, one refund went through and the payment became `REFUNDED`; the cause of the
+  earlier `401` was not identified. Refunds, including the ones of unsettled
   payments, are retried with a backoff until the gateway reports them refunded; alert on
   `refunds_pending_oldest_age_seconds`. A refused-for-good refund (a payment too old to refund, a payment the
   gateway does not know) is retried every 5 minutes and needs a person.
