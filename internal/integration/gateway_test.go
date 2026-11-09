@@ -286,7 +286,7 @@ func TestGateway_ConcurrentNotificationsApplyTheApprovalOnce(t *testing.T) {
 // ---- the public webhook through the router ----
 
 func signedWebhook(secret, dataID, requestID string, at time.Time) *http.Request {
-	ts := strconv.FormatInt(at.UnixMilli(), 10)
+	ts := strconv.FormatInt(at.Unix(), 10) // Mercado Pago sends seconds
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte("id:" + dataID + ";request-id:" + requestID + ";ts:" + ts + ";"))
 	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/mercadopago?data.id="+dataID+"&type=payment", nil)
