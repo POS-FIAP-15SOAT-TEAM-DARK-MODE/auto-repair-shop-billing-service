@@ -13,8 +13,16 @@ import (
 )
 
 // header builds a valid x-signature the way Mercado Pago does, so the tests do not depend on it.
+// Mercado Pago sends ts in seconds; headerMs is the same with milliseconds.
 func header(secret, dataID, requestID string, at time.Time) string {
-	ts := strconv.FormatInt(at.UnixMilli(), 10)
+	return signed(secret, dataID, requestID, strconv.FormatInt(at.Unix(), 10))
+}
+
+func headerMs(secret, dataID, requestID string, at time.Time) string {
+	return signed(secret, dataID, requestID, strconv.FormatInt(at.UnixMilli(), 10))
+}
+
+func signed(secret, dataID, requestID, ts string) string {
 	manifest := "id:" + dataID + ";request-id:" + requestID + ";ts:" + ts + ";"
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(manifest))
@@ -27,6 +35,10 @@ func TestVerifier(t *testing.T) {
 
 	assert.NoError(t, v.Verify(header("s3cret", "186237542593", "req-1", now), "req-1", "186237542593"))
 	assert.NoError(t, v.Verify(header("s3cret", "186237542593", "req-1", now.Add(-4*time.Minute)), "req-1", "186237542593"), "inside the tolerance")
+
+	assert.NoError(t, v.Verify(headerMs("s3cret", "186237542593", "req-1", now), "req-1", "186237542593"), "milliseconds are accepted too")
+	assert.Error(t, v.Verify(headerMs("s3cret", "186237542593", "req-1", now.Add(-time.Hour)), "req-1", "186237542593"), "stale timestamp in milliseconds")
+	assert.Error(t, v.Verify(header("s3cret", "186237542593", "req-1", now.Add(time.Hour)), "req-1", "186237542593"), "timestamp from the future")
 
 	assert.Error(t, v.Verify(header("wrong", "186237542593", "req-1", now), "req-1", "186237542593"), "wrong secret")
 	assert.Error(t, v.Verify(header("s3cret", "186237542593", "req-1", now.Add(-time.Hour)), "req-1", "186237542593"), "stale timestamp")
