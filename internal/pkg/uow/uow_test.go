@@ -106,3 +106,65 @@ func TestUnitOfWork_Execute_NilHooksOnFailure(t *testing.T) {
 
 	assert.Equal(t, expectedErr, err)
 }
+
+func TestUnitOfWork_Execute_StepPanicRollsBack(t *testing.T) {
+	failureCalls, successCalls := 0, 0
+	var cause error
+	u := &uow.UnitOfWork{
+		OnSuccess: func(ctx context.Context) error {
+			successCalls++
+			return nil
+		},
+		OnFailure: func(ctx context.Context, c error) error {
+			failureCalls++
+			cause = c
+			return nil
+		},
+	}
+
+	assert.PanicsWithValue(t, "boom", func() {
+		_ = u.Execute(context.Background(), func(ctx context.Context) error {
+			panic("boom")
+		})
+	}, "the panic goes on to the caller")
+
+	assert.Equal(t, 1, failureCalls, "the transaction is rolled back once")
+	assert.Equal(t, 0, successCalls)
+	assert.ErrorContains(t, cause, "panic")
+}
+
+func TestUnitOfWork_Execute_HooksRunOnce(t *testing.T) {
+	failureCalls, successCalls := 0, 0
+	u := &uow.UnitOfWork{
+		OnSuccess: func(ctx context.Context) error {
+			successCalls++
+			return nil
+		},
+		OnFailure: func(ctx context.Context, c error) error {
+			failureCalls++
+			return nil
+		},
+	}
+
+	assert.NoError(t, u.Execute(context.Background(), func(ctx context.Context) error { return nil }))
+	assert.Equal(t, 1, successCalls)
+	assert.Equal(t, 0, failureCalls, "no rollback after a commit")
+
+	assert.Error(t, u.Execute(context.Background(), func(ctx context.Context) error { return errors.New("step failed") }))
+	assert.Equal(t, 1, successCalls)
+	assert.Equal(t, 1, failureCalls, "one rollback, not two")
+}
+
+func TestUnitOfWork_Execute_StartFailureRunsNoHook(t *testing.T) {
+	failureCalls := 0
+	u := &uow.UnitOfWork{
+		OnStart: func(ctx context.Context) (context.Context, error) { return ctx, errors.New("no tx") },
+		OnFailure: func(ctx context.Context, c error) error {
+			failureCalls++
+			return nil
+		},
+	}
+
+	assert.Error(t, u.Execute(context.Background(), func(ctx context.Context) error { return nil }))
+	assert.Equal(t, 0, failureCalls)
+}
