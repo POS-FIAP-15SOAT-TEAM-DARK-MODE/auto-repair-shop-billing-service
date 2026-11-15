@@ -1,0 +1,9 @@
+{
+  "message_id": "b7a1c6f0-2f64-4f6e-9a49-0d5a0b1e6c11",
+  "saga_id": "0f3c9a2e-6a1d-4a53-8a6e-5d3b1f2c7e90",
+  "occurred_at": "2026-11-01T12:00:00Z",
+  "service_order_id": "01JD8Z4R3Q8M2V7K5N9XWABCDE",
+  "request_id": "2c5e1f0a-9d77-4b2c-a0c1-3f8e6b7d1a22",
+  "type": "CancelBudget",
+  "payload": {}
+}

@@ -1,0 +1,14 @@
+# <type>(<scope>): <short description>
+# |<---- max 72 characters ---->|
+#
+# Types: feat | fix | refactor | test | chore | docs | perf | style | revert
+#
+# Scopes: os | cliente | veiculo | servico | peca | estoque | orcamento |
+#         auth | usuario | infra | db | api
+#
+# --- Examples ---
+# feat(os): add status transition validation
+# fix(estoque): prevent negative stock on concurrent decrements
+# refactor(auth): extract JWT claims parsing to helper
+# test(orcamento): add edge cases for zero-item budget calculation
+# chore(infra): update docker-compose postgres version

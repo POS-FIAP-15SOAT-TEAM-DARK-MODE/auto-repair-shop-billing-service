@@ -1,0 +1,212 @@
+name: Docker
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+# Only one deploy per branch at a time; newer pushes supersede in-flight runs.
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Required for GitHub OIDC -> AWS role assumption.
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  IMAGE_NAME: auto-repair-shop-billing-service
+
+jobs:
+  publish:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'PRD' || 'STG' }}
+    env:
+      AWS_AUTH_MODE: ${{ vars.AWS_AUTH_MODE || (secrets.AWS_ACCESS_KEY_ID != '' && 'static' || 'oidc') }}
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configure AWS credentials (OIDC)
+        if: env.AWS_AUTH_MODE == 'oidc'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Configure AWS credentials (static)
+        if: env.AWS_AUTH_MODE == 'static'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Resolve image ref
+        id: image
+        run: echo "ref=${{ steps.ecr.outputs.registry }}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.image.outputs.ref }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: publish
+    environment: ${{ github.ref == 'refs/heads/main' && 'PRD' || 'STG' }}
+    env:
+      AWS_AUTH_MODE: ${{ vars.AWS_AUTH_MODE || (secrets.AWS_ACCESS_KEY_ID != '' && 'static' || 'oidc') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configure AWS credentials (OIDC)
+        if: env.AWS_AUTH_MODE == 'oidc'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Configure AWS credentials (static)
+        if: env.AWS_AUTH_MODE == 'static'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5
+
+      - name: Resolve cluster and RDS endpoint
+        run: |
+          ENV_NAME=$([ "$GITHUB_REF" = "refs/heads/main" ] && echo prd || echo stg)
+          REGION="${{ vars.AWS_REGION || 'us-east-1' }}"
+          CLUSTER="${{ vars.EKS_CLUSTER_NAME }}"
+          [ -z "$CLUSTER" ] && CLUSTER="auto-repair-shop-${ENV_NAME}-eks"
+          RDS="${{ vars.RDS_HOST }}"
+          if [ -z "$RDS" ]; then
+            RDS=$(aws rds describe-db-instances \
+              --db-instance-identifier "auto-repair-shop-${ENV_NAME}-db" \
+              --region "$REGION" \
+              --query 'DBInstances[0].Endpoint.Address' --output text)
+          fi
+          CALLER=$(aws sts get-caller-identity --query Arn --output text)
+          echo "$CALLER" | grep -qiE 'voclabs|labrole' && LAB=true || LAB=false
+          {
+            echo "DEPLOY_REGION=$REGION"
+            echo "DEPLOY_CLUSTER=$CLUSTER"
+            echo "DEPLOY_RDS=$RDS"
+            echo "ENV_NAME=$ENV_NAME"
+            echo "LAB_MODE=$LAB"
+          } >> "$GITHUB_ENV"
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "$DEPLOY_REGION" --name "$DEPLOY_CLUSTER"
+
+      - name: Resolve overlay
+        id: overlay
+        run: |
+          if [ "$LAB_MODE" = "true" ]; then
+            echo "path=k8s/manifests/overlays/lab" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            echo "path=k8s/manifests/overlays/prd" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=k8s/manifests/overlays/stg" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync migrations ConfigMap
+        run: |
+          kubectl create namespace auto-repair-shop --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create configmap billing-service-migrations --from-file=migrations \
+            -n auto-repair-shop --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n auto-repair-shop delete job billing-service-db-migrate --ignore-not-found
+
+      - name: Provision app secret (lab)
+        if: env.LAB_MODE == 'true'
+        run: |
+          SECRET_JSON=$(aws secretsmanager get-secret-value \
+            --secret-id "auto-repair-shop-${ENV_NAME}/billing" \
+            --region "$DEPLOY_REGION" --query SecretString --output text)
+          ARGS=()
+          while IFS= read -r literal; do ARGS+=("$literal"); done < <(echo "$SECRET_JSON" | jq -r 'to_entries[] | "--from-literal=\(.key)=\(.value)"')
+          kubectl -n auto-repair-shop create secret generic billing-service-secrets "${ARGS[@]}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # Optional: with MERCADOPAGO_ACCESS_TOKEN (and MERCADOPAGO_WEBHOOK_SECRET) set as organization secrets
+      # shared with this repository, the lab runs the Mercado Pago mode. Without them nothing changes and
+      # the lab overlay keeps its payment mode. stg and prd read their credentials from Secrets Manager.
+      - name: Add the Mercado Pago credentials (lab)
+        if: env.LAB_MODE == 'true'
+        env:
+          MP_TOKEN: ${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}
+          MP_WEBHOOK_SECRET: ${{ secrets.MERCADOPAGO_WEBHOOK_SECRET }}
+        run: |
+          if [ -z "$MP_TOKEN" ]; then
+            echo "No Mercado Pago credentials: the lab keeps its payment mode"
+            exit 0
+          fi
+          kubectl -n auto-repair-shop patch secret billing-service-secrets --type merge \
+            -p "$(jq -n --arg token "$MP_TOKEN" --arg webhook "$MP_WEBHOOK_SECRET" \
+              '{stringData: {MERCADOPAGO_ACCESS_TOKEN: $token, MERCADOPAGO_WEBHOOK_SECRET: $webhook}}')" >/dev/null
+          echo "Mercado Pago credentials added to billing-service-secrets"
+
+      - name: Resolve messaging endpoints
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          TOPIC_ARN="arn:aws:sns:${DEPLOY_REGION}:${ACCOUNT}:auto-repair-shop-${ENV_NAME}-billing-events"
+          QUEUE_URL="https://sqs.${DEPLOY_REGION}.amazonaws.com/${ACCOUNT}/auto-repair-shop-${ENV_NAME}-billing-queue"
+          echo "BILLING_EVENTS_TOPIC_ARN=$TOPIC_ARN" >> "$GITHUB_ENV"
+          echo "BILLING_QUEUE_URL=$QUEUE_URL" >> "$GITHUB_ENV"
+
+      - name: Deploy
+        env:
+          MERCADOPAGO_ENABLED: ${{ secrets.MERCADOPAGO_ACCESS_TOKEN != '' && 'true' || 'false' }}
+        run: |
+          OVERLAY="${{ steps.overlay.outputs.path }}"
+          if [ "$LAB_MODE" = "true" ]; then
+            sed -i "s#RDS_HOST_PLACEHOLDER#$DEPLOY_RDS#" "$OVERLAY/patch-configmap.yaml"
+          fi
+          kubectl apply -k "$OVERLAY"
+          kubectl -n auto-repair-shop patch configmap billing-service-config --type merge \
+            -p "{\"data\":{\"POSTGRES_HOST\":\"$DEPLOY_RDS\",\"BILLING_QUEUE_URL\":\"$BILLING_QUEUE_URL\",\"BILLING_EVENTS_TOPIC_ARN\":\"$BILLING_EVENTS_TOPIC_ARN\"}}"
+          if [ "$LAB_MODE" = "true" ] && [ "$MERCADOPAGO_ENABLED" = "true" ]; then
+            kubectl -n auto-repair-shop patch configmap billing-service-config --type merge \
+              -p '{"data":{"PAYMENT_MODE":"mercadopago"}}'
+            # The API Gateway gives the lab its public HTTPS URL; without it the lab settles through the reconciliation.
+            API_ENDPOINT=$(aws apigatewayv2 get-apis --region "$DEPLOY_REGION" \
+              --query "Items[?Name=='auto-repair-shop-${ENV_NAME}-gateway'].ApiEndpoint | [0]" --output text)
+            if [ -n "$API_ENDPOINT" ] && [ "$API_ENDPOINT" != "None" ]; then
+              kubectl -n auto-repair-shop patch configmap billing-service-config --type merge \
+                -p "{\"data\":{\"MERCADOPAGO_NOTIFICATION_URL\":\"$API_ENDPOINT/$ENV_NAME/v1/webhooks/mercadopago\"}}"
+            else
+              echo "No API Gateway yet: the webhook URL stays empty and payments settle through the reconciliation"
+            fi
+          fi
+          kubectl -n auto-repair-shop set image deploy/billing-service \
+            app=${{ needs.publish.outputs.image }}
+
+      - name: Wait for rollout
+        run: kubectl -n auto-repair-shop rollout status deploy/billing-service --timeout=180s

@@ -1,0 +1,67 @@
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      AWS_ENDPOINT_URL: http://ministack:4566
+    ports:
+      - "${PORT:-8083}:${PORT:-8083}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      aws-init:
+        condition: service_completed_successfully
+    networks: [backend]
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: billing_app
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: billing
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billing_app -d billing"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [backend]
+
+  migrate:
+    image: migrate/migrate
+    volumes:
+      - ./migrations:/migrations
+    command: ["-path=/migrations", "-database", "postgres://billing_app:change-me@db:5432/billing?sslmode=disable", "up"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+
+  ministack:
+    image: ministackorg/ministack
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')\" || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  aws-init:
+    image: amazon/aws-cli
+    entrypoint: ["/bin/sh", "/init/init-aws.sh"]
+    volumes:
+      - ./local:/init
+    environment:
+      AWS_ENDPOINT_URL: http://ministack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      ministack:
+        condition: service_healthy
+    networks: [backend]
+
+networks:
+  backend:
